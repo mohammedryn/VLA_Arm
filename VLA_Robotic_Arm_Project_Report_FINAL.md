@@ -17,12 +17,12 @@
    - 6.3 Depth Sensing: VL53L5CX Time-of-Flight Array (Wrist-Mounted)
    - 6.4 Inertial Sensing: ISM330DHCX Industrial-Grade IMU (End-Effector)
    - 6.5 Visual Sensing: Raspberry Pi Camera Module 3 (Fixed Overhead)
-   - 6.6 Real-Time Compute: Teensy 4.1 Microcontroller
+   - 6.6 Real-Time Compute: ESP32-WROOM-32 Microcontroller
    - 6.7 High-Performance Compute: Raspberry Pi 5 (8GB)
    - 6.8 Power Architecture
 7. [Hierarchical Compute Architecture](#7-hierarchical-compute-architecture)
    - 7.1 Design Philosophy
-   - 7.2 Teensy 4.1 Responsibilities
+   - 7.2 ESP32-WROOM-32 Responsibilities
    - 7.3 Raspberry Pi 5 Responsibilities
    - 7.4 Inter-Processor Communication Protocol
 8. [Perception Pipeline](#8-perception-pipeline)
@@ -43,7 +43,7 @@
     - 11.2 Inverse Kinematics Solver
     - 11.3 Safety Enforcement
 12. [Real-Time Control Loop](#12-real-time-control-loop)
-    - 12.1 Teensy 4.1 Control Loop
+    - 12.1 ESP32-WROOM-32 Control Loop
     - 12.2 Raspberry Pi 5 Inference Loop
     - 12.3 Latency Budget Analysis
 13. [Training Methodology](#13-training-methodology)
@@ -72,7 +72,7 @@ This project proposes a **Hierarchical VLA architecture with Multi-Modal Contact
 
 The sensing architecture follows a deliberate hybrid placement strategy: the Pi Camera 3 is fixed overhead on a rigid post to reduce arm occlusion during manipulation, the VL53L5CX is arm-mounted at the wrist pointing downward for direct grasp-depth measurement, and the ISM330DHCX is mounted on the end-effector for high-frequency contact vibration detection. This placement strategy is designed to avoid two common demo failure modes — arm occlusion of a behind-mounted camera, and CSI ribbon cable fatigue from eye-in-hand routing.
 
-The compute stack is partitioned across a **Teensy 4.1 microcontroller** (50Hz deterministic servo control, sensor acquisition, hardware-level safety enforcement) and a **Raspberry Pi 5 8GB** (target 8Hz VLA inference, YOLOv8-nano detection, language encoding, analytical IK planning). The preferred VLA candidate is SmolVLA-450M because it is designed for affordable robotics and CPU-capable deployment; Octo-small + LoRA is retained as a lower-latency fallback baseline if Raspberry Pi 5 benchmarking shows SmolVLA cannot reliably meet the 125ms per-step budget. Validation targets include ≥80% task success on structured pick-place, stacking, and language-conditioned sorting, with 100% workspace-compliant trajectories.
+The compute stack is partitioned across an **ESP32-WROOM-32 microcontroller** (50Hz deterministic servo control via FreeRTOS Core 1, sensor acquisition, hardware-level safety enforcement) and a **Raspberry Pi 5 8GB** (target 8Hz VLA inference, YOLOv8-nano detection, language encoding, analytical IK planning). The preferred VLA candidate is SmolVLA-450M because it is designed for affordable robotics and CPU-capable deployment; Octo-small + LoRA is retained as a lower-latency fallback baseline if Raspberry Pi 5 benchmarking shows SmolVLA cannot reliably meet the 125ms per-step budget. Validation targets include ≥80% task success on structured pick-place, stacking, and language-conditioned sorting, with 100% workspace-compliant trajectories.
 
 The planned contribution is a documented VLA deployment on the STS3215 serial-bus ecosystem, a cost-effective multi-modal contact detection method using ISM330DHCX gyroscope vibration analysis, and a hierarchical embedded architecture applicable to MSME automation, agricultural sorting, and accessible robotics education.
 
@@ -94,7 +94,7 @@ The STS3215 serial-bus servo ecosystem, used widely in educational and MSME robo
 
 ### 2.3 This Project's Position
 
-This project occupies a specific and underexplored position in the literature: a VLA system designed ground-up for a 4-DOF, five-servo STS3215 serial-bus arm, running on a Raspberry Pi 5 with a Teensy 4.1 real-time co-processor, using only 30 teleoperation demonstrations for initial training, and integrating three sensors (Pi Camera 3 fixed overhead, VL53L5CX wrist-mounted, ISM330DHCX end-effector) in a unified perception and contact sensing pipeline. The central hypothesis is that hierarchical decomposition of manipulation into interpretable skill tokens, combined with multi-modal sensor fusion and analytical IK safety, is sufficient to achieve robust, safe manipulation on an affordable platform without scaling to thousands of demonstrations or expensive additional hardware.
+This project occupies a specific and underexplored position in the literature: a VLA system designed ground-up for a 4-DOF, five-servo STS3215 serial-bus arm, running on a Raspberry Pi 5 with an ESP32-WROOM-32 real-time co-processor, using only 30 teleoperation demonstrations for initial training, and integrating three sensors (Pi Camera 3 fixed overhead, VL53L5CX wrist-mounted, ISM330DHCX end-effector) in a unified perception and contact sensing pipeline. The central hypothesis is that hierarchical decomposition of manipulation into interpretable skill tokens, combined with multi-modal sensor fusion and analytical IK safety, is sufficient to achieve robust, safe manipulation on an affordable platform without scaling to thousands of demonstrations or expensive additional hardware.
 
 ---
 
@@ -179,9 +179,9 @@ The complete system is organized as three interacting layers that operate concur
 
 **Hardware Layer:** A 4-DOF robotic arm driven by five 12V STS3215 serial-bus servos: one base-yaw servo, two mechanically coupled shoulder servos acting as one high-torque pitch joint, one elbow/wrist pitch servo, and one gripper servo. The arm is equipped with a VL53L5CX depth sensor array at the wrist pointing downward toward the gripper, an ISM330DHCX IMU on the end-effector, and a Pi Camera Module 3 mounted on a rigid overhead post pointing straight down at the workspace.
 
-**Real-Time Layer:** A Teensy 4.1 microcontroller executing a 50Hz deterministic control loop — reading sensor data, computing contact oracle outputs, interpolating waypoints, enforcing joint limit safety, and driving the servo serial bus — completely independent of operating system scheduling.
+**Real-Time Layer:** An ESP32-WROOM-32 microcontroller executing a 50Hz deterministic control loop via a FreeRTOS task pinned to Core 1 — reading sensor data, computing contact oracle outputs, interpolating waypoints, enforcing joint limit safety, and driving the servo serial bus — with WiFi/BT disabled to eliminate scheduler interference.
 
-**Inference Layer:** A Raspberry Pi 5 (8GB RAM) running the full ML pipeline — YOLOv8-nano object detection on overhead RGB frames, language encoding, SmolVLA-450M + LoRA or Octo-small + LoRA VLA inference, 3D pose estimation from overhead (X, Y) and wrist ToF (Z), and analytical IK planning — at a target 8Hz, publishing target joint waypoints to the Teensy over USB serial.
+**Inference Layer:** A Raspberry Pi 5 (8GB RAM) running the full ML pipeline — YOLOv8-nano object detection on overhead RGB frames, language encoding, SmolVLA-450M + LoRA or Octo-small + LoRA VLA inference, 3D pose estimation from overhead (X, Y) and wrist ToF (Z), and analytical IK planning — at a target 8Hz, publishing target joint waypoints to the ESP32 over USB serial.
 
 The complete data flow is illustrated below:
 
@@ -196,7 +196,7 @@ flowchart TB
         LANG["Language instruction<br/>e.g. 'pick red block'"]
         EMB["Cached language embedding"]
         VLA["SmolVLA / Octo + LoRA<br/>Skill + delta-joints"]
-        STATE["Joint state (4D) + skill state<br/>from Teensy telemetry"]
+        STATE["Joint state (4D) + skill state<br/>from ESP32 telemetry"]
 
         CAM --> YOLO --> XY
         TOF --> Z
@@ -214,7 +214,7 @@ flowchart TB
         SKILL --> IK --> SAFE
     end
 
-    subgraph REALTIME["Real-Time Control (Teensy 4.1)"]
+    subgraph REALTIME["Real-Time Control (ESP32-WROOM-32, Core 1, 50Hz)"]
         USB["USB serial @ 2Mbps<br/>20-byte command packet"]
         INTERP["Waypoint interpolation<br/>8Hz target -> 50Hz smooth commands"]
         BUS["STS3215 serial bus<br/>5 servos, UART @ 1Mbps, half-duplex"]
@@ -255,7 +255,7 @@ The manipulator is a 4-DOF serial chain arm with five physical servos. Two STS32
 
 The four independently controllable variables are therefore base yaw, shoulder pitch, elbow/wrist pitch, and gripper opening. For Cartesian pose planning, J0-J2 define the end-effector approach position, while J3 controls grasp state and does not change the arm's spatial kinematic chain.
 
-**Shoulder Design Rationale:** The shoulder pitch joint bears the largest gravitational moment because it supports all downstream links and the payload. A single 12V STS3215 provides 30 kg.cm stall torque, which is marginal for a fully extended arm with payload. Two servos coupled on the shoulder axis double the available stall torque to approximately 60 kg.cm while sharing load current and reducing thermal stress on individual motors. Both shoulder servos are assigned unique bus IDs and receive identical position commands from the Teensy, with load readings averaged for control feedback.
+**Shoulder Design Rationale:** The shoulder pitch joint bears the largest gravitational moment because it supports all downstream links and the payload. A single 12V STS3215 provides 30 kg.cm stall torque, which is marginal for a fully extended arm with payload. Two servos coupled on the shoulder axis double the available stall torque to approximately 60 kg.cm while sharing load current and reducing thermal stress on individual motors. Both shoulder servos are assigned unique bus IDs and receive identical position commands from the ESP32, with load readings averaged for control feedback.
 
 **Workspace:** Approximate reach radius of 35–40cm from base center, workspace height 0–30cm above table, angular reach ±150° in yaw. Specific workspace limits are determined during calibration and encoded in the IK safety layer.
 
@@ -267,21 +267,21 @@ The Feetech STS3215 is chosen as the primary actuator for the following reasons:
 
 **Position Resolution:** 4096 steps per revolution (12-bit encoder), corresponding to 0.088° per step. This resolution is sufficient for pick-and-place manipulation but not precision assembly tasks.
 
-**Serial Bus Protocol:** All servos share a single half-duplex UART bus at 1Mbps. Each servo is individually addressable by an 8-bit ID, enabling broadcast and selective commands from a single Teensy UART peripheral. Half-duplex operation requires the Teensy to manage TX/RX direction control, which is handled natively in firmware using a direction-control GPIO line.
+**Serial Bus Protocol:** All servos share a single half-duplex UART bus at 1Mbps. Each servo is individually addressable by an 8-bit ID, enabling broadcast and selective commands from the ESP32's UART2 peripheral (GPIO16/17). Half-duplex operation requires the ESP32 to manage TX/RX direction control via a direction-control GPIO (GPIO4), toggled in firmware before and after each bus transaction.
 
 **Onboard Telemetry:** Each STS3215 reports the following over the same serial bus on read request: present position (12-bit), present speed (11-bit with direction), present load (10-bit, proportional to motor current), present voltage (8-bit, 0.1V/LSB), and present temperature (8-bit, 1°C/LSB). At 50Hz polling with five servos, the total bus utilization remains below 40% of available bandwidth, leaving margin for command writes.
 
-**Thermal Protection:** Hardware overcurrent cutoff activates at 80°C motor temperature, providing passive protection against stall damage during grasping. The Teensy monitors temperature telemetry and implements a software warning threshold at 65°C.
+**Thermal Protection:** Hardware overcurrent cutoff activates at 80°C motor temperature, providing passive protection against stall damage during grasping. The ESP32 monitors temperature telemetry and implements a software warning threshold at 65°C.
 
 ### 6.3 Depth Sensing: VL53L5CX Time-of-Flight Array (Wrist-Mounted)
 
-The STMicroelectronics VL53L5CX is a solid-state ToF sensor providing either a 4×4 grid of 16 zones or an 8×8 grid of 64 zones using a single-photon avalanche diode (SPAD) array with 940nm VCSEL illumination. This project uses **8×8 mode at 15Hz** because grasp-depth accuracy benefits more from spatial resolution than from 60Hz depth updates. The Teensy forwards the latest valid ToF frame in every 50Hz telemetry packet, along with a ToF timestamp, so the RPi 5 can distinguish fresh depth data from a repeated sample.
+The STMicroelectronics VL53L5CX is a solid-state ToF sensor providing either a 4×4 grid of 16 zones or an 8×8 grid of 64 zones using a single-photon avalanche diode (SPAD) array with 940nm VCSEL illumination. This project uses **8×8 mode at 15Hz** because grasp-depth accuracy benefits more from spatial resolution than from 60Hz depth updates. The ESP32 forwards the latest valid ToF frame in every 50Hz telemetry packet, along with a ToF timestamp, so the RPi 5 can distinguish fresh depth data from a repeated sample.
 
 - **Ranging distance:** 2cm to 400cm (operating range for wrist grasp sensing: 2–30cm)
 - **Zone angular resolution:** 8° per zone (63° total diagonal FOV)
 - **Update rate:** 8×8 mode up to 15Hz, 4×4 mode up to 60Hz; this project uses 8×8 at 15Hz
 - **Range accuracy:** ±5mm typical at 200mm range under ambient light
-- **Interface:** I2C at up to 1MHz, operating at 400kHz on the Teensy 4.1 Wire peripheral
+- **Interface:** I2C at up to 1MHz, operating at 400kHz on the ESP32 Wire bus (GPIO21=SDA, GPIO22=SCL)
 
 **Mounting — Wrist-Downward:** The VL53L5CX is mounted on a compact bracket affixed near the gripper/end-effector bracket, oriented to point directly downward toward the gripper and object below. Four 22AWG silicone-insulated wires (SDA, SCL, 3.3V, GND) are routed along the arm linkages using small cable clips, tolerating continuous flexion through joints without fatigue — a fundamentally different mechanical situation from a CSI ribbon cable.
 
@@ -307,12 +307,12 @@ The STMicroelectronics ISM330DHCX is an industrial-grade 6-DOF IMU integrating a
 | Gyroscope FS range | ±250°/s |
 | Accelerometer ODR | 6,667Hz |
 | Accelerometer FS range | ±2g |
-| Interface | SPI at 10MHz (Teensy 4.1 SPI0) |
+| Interface | SPI at 10MHz (ESP32 VSPI: MOSI=GPIO23, MISO=GPIO19, SCK=GPIO18, CS=GPIO5) |
 | FIFO | Up to 9kB hardware FIFO, burst-read at 50Hz intervals |
 | Gyro noise floor | 3.8 mdps/√Hz |
 | Shock rating | 70g operational |
 
-**FIFO Strategy:** The IMU FIFO stores raw sensor words, not floating-point samples. With 3-axis gyroscope and 3-axis accelerometer enabled, each timestamp-free 6-axis sample is 12 bytes (6 channels × 16 bits). At 6.667kHz, the raw stream is approximately 80kB/s. A 9kB FIFO therefore holds roughly 112ms of 6-axis data, or longer if only gyroscope samples are pushed into the FIFO. Reading the FIFO every 20ms at 50Hz requires transferring approximately 1.6kB per cycle, well within a 10MHz SPI budget. The Teensy converts raw samples to physical units after the burst read, processes gyro RMS for contact detection, and forwards only summary IMU values plus contact metrics in the 50Hz telemetry packet.
+**FIFO Strategy:** The IMU FIFO stores raw sensor words, not floating-point samples. With 3-axis gyroscope and 3-axis accelerometer enabled, each timestamp-free 6-axis sample is 12 bytes (6 channels × 16 bits). At 6.667kHz, the raw stream is approximately 80kB/s. A 9kB FIFO therefore holds roughly 112ms of 6-axis data, or longer if only gyroscope samples are pushed into the FIFO. Reading the FIFO every 20ms at 50Hz requires transferring approximately 1.6kB per cycle, well within a 10MHz SPI budget. The ESP32 converts raw samples to physical units after the burst read, processes gyro RMS for contact detection, and forwards only summary IMU values plus contact metrics in the 50Hz telemetry packet.
 
 ### 6.5 Visual Sensing: Raspberry Pi Camera Module 3 (Fixed Overhead)
 
@@ -332,18 +332,21 @@ The Raspberry Pi Camera Module 3 uses a Sony IMX708 12.3MP image sensor with a 6
 
 Camera intrinsic calibration is performed using a 9×6 checkerboard pattern and OpenCV's `calibrateCamera` function, producing a calibration matrix K and distortion coefficients stored as a YAML file loaded at startup.
 
-### 6.6 Real-Time Compute: Teensy 4.1 Microcontroller
+### 6.6 Real-Time Compute: ESP32-WROOM-32 Microcontroller
 
-The Teensy 4.1 is based on the NXP IMXRT1062 Cortex-M7 processor running at 600MHz with a hardware floating-point unit and DSP extensions. It is chosen for this project over alternatives (STM32, Arduino Mega) for the following reasons:
+The ESP32-WROOM-32 is based on the Espressif Xtensa dual-core LX6 processor running at 240MHz with a hardware floating-point unit. It is used in this project as the real-time co-processor with the following relevant characteristics:
 
-- 600MHz Cortex-M7 with FPU: sufficient for real-time DSP including IMU contact oracle RMS computation
-- 7 hardware UARTs: UART1 for STS3215 bus, UART2 for RPi 5 communication, others reserved
-- 3 SPI buses, 3 I2C buses: SPI0 for ISM330DHCX, Wire1 for VL53L5CX
-- 1MB SRAM: sufficient for 9kB IMU FIFO buffer, ToF frames, telemetry structs, and firmware
-- Native USB HS (480Mbps): clean, low-latency communication to RPi 5
-- No OS: deterministic bare-metal execution, no scheduler jitter
+- **240MHz Xtensa LX6 dual-core with FPU:** sufficient for contact oracle RMS computation, servo telemetry polling, and waypoint interpolation at 50Hz
+- **FreeRTOS (built-in):** the 50Hz control task is pinned exclusively to Core 1 (`app_cpu`); USB serial comms runs on Core 0 (`pro_cpu`). WiFi and Bluetooth are disabled at startup to eliminate all RF interrupt sources from Core 0
+- **3 hardware UARTs:** UART2 (GPIO16/17) for STS3215 servo bus at 1Mbps; UART0 (GPIO1/3 via onboard USB bridge) for RPi5 serial comms
+- **VSPI hardware SPI:** GPIO18/19/23 for ISM330DHCX at 10MHz; configurable CS on GPIO5
+- **Wire (I2C0):** GPIO21/22 for VL53L5CX at 400kHz
+- **520KB SRAM:** sufficient for 9kB IMU FIFO buffer, ToF frames, telemetry structs, and firmware stack
+- **USB via onboard CH340/CP2102 bridge:** connects to RPi5 USB-A port; supports 2Mbps baud rate
 
-The Teensy runs custom firmware written in C++ using the Teensyduino framework for peripheral access and Arduino-compatible library compatibility.
+**Timing note:** The ESP32 FreeRTOS tick is 1ms. `vTaskDelayUntil` at a 20ms period provides ±0.5–1ms jitter when WiFi/BT are off. This is acceptable for STS3215 servo position control, which has an internal PID loop and a mechanical deadband that absorbs sub-millisecond command timing variation.
+
+The ESP32 runs custom firmware written in C++17 using the espressif32 Arduino framework (PlatformIO), maintaining full Arduino-compatible library compatibility for VL53L5CX and SPI/Wire drivers.
 
 ### 6.7 High-Performance Compute: Raspberry Pi 5 (8GB)
 
@@ -375,11 +378,11 @@ flowchart TB
     STS["STS3215 bus<br/>all 5 servos"]
     BUCK["Buck converter"]
     RPI["Raspberry Pi 5<br/>5V, 5A via USB-C"]
-    TEENSY["Teensy 4.1<br/>USB from RPi 5"]
+    ESP32["ESP32-WROOM-32<br/>USB from RPi 5 (via CH340/CP2102)"]
 
     SUPPLY --> SERVO --> STS
     SERVO --> CAP
-    SUPPLY --> BUCK --> RPI --> TEENSY
+    SUPPLY --> BUCK --> RPI --> ESP32
 ```
 
 The servo and compute rails are separated at the power-distribution level and share only the required common ground for communication. A 1000µF electrolytic capacitor placed across the servo power rail at the terminal block absorbs short motor transients from braking and stall events, reducing the risk of servo current spikes resetting the RPi 5.
@@ -392,36 +395,39 @@ The servo and compute rails are separated at the power-distribution level and sh
 
 The fundamental constraint of real-time robotic control is that servo commands must arrive with deterministic timing. A 50Hz control loop requires one command packet every 20ms, with a maximum allowable jitter of approximately 2ms before motion artifacts become visible. The Linux kernel, even with `PREEMPT` patches, introduces worst-case scheduling latencies of 10–50ms under CPU load — completely incompatible with servo control when the CPU is simultaneously running neural network inference.
 
-The solution is a strict compute hierarchy: the Teensy 4.1 owns all timing-critical operations on bare metal, while the Raspberry Pi 5 owns all computationally intensive operations under Linux. The Teensy does not depend on the RPi 5 for control loop execution — if the RPi 5 takes 200ms instead of 125ms on an inference step, the Teensy continues executing the last-received waypoints through smooth interpolation. This decoupling guarantees physical arm smoothness independent of inference load. This architecture mirrors the compute partitioning used in professional robotics platforms such as those built by Boston Dynamics, Clearpath, and industrial manipulation vendors.
+The solution is a strict compute hierarchy: the ESP32-WROOM-32 owns all timing-critical operations via a FreeRTOS task pinned to Core 1 (with WiFi/BT off), while the Raspberry Pi 5 owns all computationally intensive operations under Linux. The ESP32 does not depend on the RPi 5 for control loop execution — if the RPi 5 takes 200ms instead of 125ms on an inference step, the ESP32 continues executing the last-received waypoints through smooth interpolation. This decoupling guarantees physical arm smoothness independent of inference load. This architecture mirrors the compute partitioning used in professional robotics platforms such as those built by Boston Dynamics, Clearpath, and industrial manipulation vendors.
 
-### 7.2 Teensy 4.1 Responsibilities
+### 7.2 ESP32-WROOM-32 Responsibilities
 
-The Teensy executes the following tasks in a single 20ms (50Hz) main loop:
+The ESP32 executes the following tasks across two FreeRTOS tasks. `control_task` is pinned to Core 1 at priority 10 and runs at exactly 50Hz via `vTaskDelayUntil`. `comms_task` is pinned to Core 0 at priority 5 and handles all USB serial I/O. Shared state between them is protected by two FreeRTOS mutexes (one for telemetry, one for the latest command).
 
-**Task 1 — Sensor Acquisition (Priority: Highest):**
-At the top of each 20ms cycle, the Teensy performs a partial FIFO read from the ISM330DHCX via SPI burst. The VL53L5CX runs autonomously in 8×8 mode at 15Hz; when a new frame-ready interrupt is available, the Teensy reads the latest ToF frame into a buffer. Each 50Hz telemetry packet includes the most recent ToF frame and its timestamp, so the RPi 5 can use fresh depth when available and safely reuse the last valid depth between 15Hz updates.
+**Step 1 — Sensor Acquisition (control_task, Core 1):**
+At the top of each 20ms cycle, the ESP32 performs a burst FIFO read from the ISM330DHCX via VSPI. The VL53L5CX runs autonomously in 8×8 mode at 15Hz; when the INT line fires (GPIO26), the latest ToF frame is read into a buffer. Each 50Hz telemetry packet includes the most recent ToF frame and its timestamp, so the RPi 5 can use fresh depth when available and safely reuse the last valid depth between 15Hz updates.
 
-**Task 2 — Contact Oracle (Priority: High):**
-The ISM330DHCX gyro FIFO data is processed for RMS vibration magnitude over the last 20 samples (~3.0ms window at 6.667kHz). If the RMS exceeds the calibrated contact threshold, the contact flag is set immediately, triggering a skill state transition flag available to the servo control task. This computation runs in approximately 0.05ms on the Cortex-M7 FPU.
+**Step 2 — Contact Oracle (control_task, Core 1):**
+The ISM330DHCX gyro FIFO data is processed for RMS vibration magnitude over the last 20 samples (~3.0ms window at 6.667kHz). If the RMS exceeds the calibrated contact threshold, the contact flag is set immediately, triggering a skill state transition flag available to the servo control task. This computation runs in approximately 0.05ms on the Xtensa LX6 FPU.
 
-**Task 3 — Waypoint Interpolation:**
-The RPi 5 sends target joint positions at 8Hz. The Teensy maintains a ring buffer of the two most recent RPi 5 commands and performs linear interpolation between them at 50Hz, producing smooth 20ms motion commands even with irregular inference timing from the RPi 5.
+**Step 3 — Waypoint Interpolation (control_task, Core 1):**
+The RPi 5 sends target joint positions at 8Hz. The ESP32 performs linear interpolation between the last received command and the current position at 50Hz, producing smooth 20ms motion commands even with irregular inference timing from the RPi 5.
 
-**Task 4 — Hardware Safety Enforcement:**
+**Step 4 — Hardware Safety Enforcement (control_task, Core 1):**
 Every computed joint command (post-interpolation) is clamped to the calibrated joint limits before being written to the servo bus. This enforcement occurs on every single 20ms cycle regardless of what the RPi 5 has sent.
 
-**Task 5 — STS3215 Bus Polling:**
-Position, load, and speed are read from all five physical servos once per 20ms control period. If bus timing measurements show this is too tight, the firmware must explicitly document a staggered fallback with a lower per-servo telemetry rate instead of silently changing the packet contract.
+**Step 5 — STS3215 Bus Polling (control_task, Core 1):**
+Position, load, and speed are read from all five physical servos once per 20ms control period via UART2 (Serial2, GPIO16/17) at 1Mbps. If bus timing measurements show this is too tight, the firmware must explicitly document a staggered fallback with a lower per-servo telemetry rate instead of silently changing the packet contract.
 
-**Task 6 — Telemetry Transmission:**
-At 50Hz, a 250-byte telemetry struct (defined in Section 7.4) is transmitted to the RPi 5 over USB serial, carrying all sensor data needed for the inference pipeline. ToF values update at 15Hz inside that stream and are explicitly timestamped.
+**Step 6 — Telemetry Assembly and Hand-Off (control_task → comms_task):**
+At the end of each 20ms control cycle, the assembled 250-byte `ControllerTelemetry_t` struct is copied into a shared buffer under mutex. `comms_task` on Core 0 reads this buffer and transmits it to the RPi 5 over USB serial (UART0 via onboard bridge) at 2Mbps. ToF values update at 15Hz inside that stream and are explicitly timestamped.
+
+**Step 7 — Command Reception (comms_task, Core 0):**
+`comms_task` continuously checks for incoming 20-byte `RPiCommand_t` packets from the RPi 5. On receipt, the command is validated by checksum and written into a shared buffer under mutex. `control_task` reads this buffer non-blocking at the start of each 20ms cycle.
 
 ### 7.3 Raspberry Pi 5 Responsibilities
 
 The RPi 5 executes the VLA inference pipeline as a Python 3.11 process with the following thread allocation:
 
 **Main Inference Thread (8Hz target):**
-Reads latest telemetry from USB serial, runs the full perception and planning pipeline, writes command packets back to the Teensy.
+Reads latest telemetry from USB serial, runs the full perception and planning pipeline, writes command packets back to the ESP32.
 
 **Camera Capture Thread (30fps):**
 Continuously reads frames from the Pi Camera 3 via libcamera, maintaining a ring buffer. The inference thread grabs the latest available frame without blocking.
@@ -435,11 +441,11 @@ The inference thread and camera thread communicate through a thread-safe shared 
 
 USB Serial at 2Mbps carries binary-packed structs in both directions.
 
-**Teensy → RPi 5 Telemetry Packet (250 bytes, 50Hz):**
+**ESP32 → RPi 5 Telemetry Packet (250 bytes, 50Hz):**
 
 ```c
 typedef struct __attribute__((packed)) {
-    uint32_t timestamp_us;     // Microsecond timestamp from Teensy systick
+    uint32_t timestamp_us;     // Microsecond timestamp from ESP32 micros()
     float    servo_pos[5];     // Physical servo positions in degrees (0.088° resolution)
     float    servo_load[5];    // Physical servo load, normalized 0.0–1.0
     float    servo_speed[5];   // Physical servo speed in degrees/second
@@ -454,10 +460,10 @@ typedef struct __attribute__((packed)) {
     float    contact_rms;      // Current gyro RMS for threshold monitoring
     uint8_t  safety_clamped;   // 1 if hardware safety clamped a command this cycle
     uint16_t checksum;         // Simple sum checksum for packet integrity
-} TeensyTelemetry_t;  // 250 bytes when packed
+} ControllerTelemetry_t;  // 250 bytes when packed — verify with sizeof() in firmware
 ```
 
-**RPi 5 → Teensy Command Packet (20 bytes, 8Hz):**
+**RPi 5 → ESP32 Command Packet (20 bytes, 8Hz):**
 
 ```c
 typedef struct __attribute__((packed)) {
@@ -616,7 +622,7 @@ class ContactOracle:
         self.contact_timestamp = None
 
     def update(self, gx, gy, gz, timestamp_us):
-        """Called from Teensy telemetry packet at 50Hz, processing latest FIFO batch."""
+        """Called from ESP32 ControllerTelemetry_t packet at 50Hz, processing latest FIFO batch."""
         magnitude = np.sqrt(gx**2 + gy**2 + gz**2)
         self.gyro_buffer.append(magnitude)
 
@@ -648,7 +654,7 @@ class ContactOracle:
         self.contact_timestamp = None
 ```
 
-**Advantage over load-based detection:** The IMU transient is detected within an approximately 3.0ms signal window, with practical trigger latency expected to be bounded by FIFO service and the 20ms Teensy loop. This is still much faster than the 100–200ms typically required for sustained load threshold confirmation, reducing the probability of the gripper over-squeezing a delicate object before the control loop responds.
+**Advantage over load-based detection:** The IMU transient is detected within an approximately 3.0ms signal window, with practical trigger latency expected to be bounded by FIFO service and the 20ms ESP32 control loop. This is still much faster than the 100–200ms typically required for sustained load threshold confirmation, reducing the probability of the gripper over-squeezing a delicate object before the control loop responds.
 
 **Advantage over lower-ODR IMUs:** At 1,125Hz (ICM-20948), a 20-sample window spans 17.8ms — potentially smearing the peak of the contact transient. The ISM330DHCX at 6.667kHz provides a much narrower window, improving sensitivity to brief contacts with elastic objects.
 
@@ -700,7 +706,7 @@ This four-skill ontology is a domain-specific simplification of richer skill voc
 
 ### 10.2 Visual-Language Skill Predictor: SmolVLA-450M + LoRA, with Octo-small Baseline
 
-**Recommended Base Model:** SmolVLA-450M is the preferred primary VLA candidate for this project because it was designed for affordable robotics, consumer hardware, small-lab data collection, and asynchronous action execution. These assumptions align more closely with a Raspberry Pi + Teensy architecture than 7B-scale VLA models. Its larger parameter count compared with Octo-small may improve language-conditioned manipulation quality, but the Raspberry Pi 5 latency budget must be benchmarked before final deployment.
+**Recommended Base Model:** SmolVLA-450M is the preferred primary VLA candidate for this project because it was designed for affordable robotics, consumer hardware, small-lab data collection, and asynchronous action execution. These assumptions align more closely with a Raspberry Pi + ESP32 architecture than 7B-scale VLA models. Its larger parameter count compared with Octo-small may improve language-conditioned manipulation quality, but the Raspberry Pi 5 latency budget must be benchmarked before final deployment.
 
 **Fallback Baseline:** Octo-small (~27M parameters) remains the safest low-latency fallback. If SmolVLA-450M cannot reliably meet the target 8Hz inference loop after quantization, the project should deploy Octo-small + LoRA and report SmolVLA as an evaluated alternative.
 
@@ -744,7 +750,7 @@ Wrist ToF center: 1-dimensional scalar, distance in mm (during REACH → GRASP t
 
 The skill embedding (output of the softmax head, or the ground-truth skill token during supervised training) modulates the joint delta prediction head through cross-attention, conditioning the predicted action distribution on the current manipulation phase. This ensures that actions predicted during REACH are smooth with large joint displacement magnitudes (moving toward the object), while actions during GRASP have small magnitudes (fine gripper closure) and actions during LIFT have a characteristic J1-upward signature.
 
-The 8-step action chunk is executed by the Teensy over 1 second (8 steps × 125ms), with the Teensy interpolating each chunk at 50Hz. A new chunk is computed by the RPi 5 every 125ms, with the most recent chunk always overwriting the Teensy's interpolation buffer on receipt.
+The 8-step action chunk is executed by the ESP32 over 1 second (8 steps × 125ms), with the ESP32 interpolating each chunk at 50Hz via `vTaskDelayUntil`. A new chunk is computed by the RPi 5 every 125ms, with the most recent chunk always overwriting the ESP32's interpolation buffer on receipt.
 
 ### 10.4 Multi-Modal Skill Segmentation
 
@@ -764,7 +770,7 @@ def segment_skill(t, joint_pos, joint_vel, joint_load, imu_contact,
                   ee_height, wrist_tof_z):
     """
     Assigns a skill label to each timestep of a demonstration trajectory.
-    All signals from Teensy telemetry; ee_height from forward kinematics.
+    All signals from ESP32 ControllerTelemetry_t; ee_height from forward kinematics.
     wrist_tof_z: center zone depth from wrist-mounted VL53L5CX in meters.
     """
     j1_angle    = joint_pos[1]
@@ -824,9 +830,9 @@ The closed-form solver produces solutions in approximately 0.1ms, making it suit
 
 ### 11.3 Safety Enforcement
 
-Every joint command — whether from the RPi 5 inference pipeline or from the Teensy's own interpolation — passes through a three-stage safety filter before being written to the servo bus:
+Every joint command — whether from the RPi 5 inference pipeline or from the ESP32's own interpolation — passes through a three-stage safety filter before being written to the servo bus:
 
-**Stage 1 — Joint Limit Clamping (Teensy, every 20ms):**
+**Stage 1 — Joint Limit Clamping (ESP32 control_task, every 20ms):**
 ```c
 for (int i = 0; i < 5; i++) {
     cmd.joints[i] = constrain(cmd.joints[i],
@@ -856,11 +862,13 @@ The combination of these three stages reduces the probability that an invalid ne
 
 ## 12. Real-Time Control Loop
 
-### 12.1 Teensy 4.1 Control Loop
+### 12.1 ESP32-WROOM-32 Control Loop
+
+The control loop runs as a FreeRTOS task on Core 1, timed with `vTaskDelayUntil` at 20ms (50Hz). WiFi and BT are disabled; Core 1 receives no RF interrupts. Timing jitter: ±0.5–1ms.
 
 ```mermaid
 flowchart TB
-    START["Teensy 4.1 main loop<br/>20ms period, 50Hz"]
+    START["ESP32 control_task (Core 1)<br/>20ms period via vTaskDelayUntil, 50Hz"]
     SPI["T=0ms<br/>SPI burst read ISM330DHCX FIFO<br/>~2ms"]
     I2C["T=0ms<br/>Read latest VL53L5CX frame if ready<br/>~1ms"]
     ORACLE["T=1ms<br/>Run ContactOracle.update()<br/>~0.05ms"]
@@ -878,12 +886,12 @@ flowchart TB
 ### 12.2 Raspberry Pi 5 Inference Loop
 
 ```python
-def inference_loop(teensy_serial, camera_buffer, models, state):
+def inference_loop(controller_serial, camera_buffer, models, state):
     """Target period: 125ms (8Hz)"""
     t0 = time.monotonic()
 
     # --- READ (2ms) ---
-    telemetry  = read_telemetry(teensy_serial)       # 250-byte packet
+    telemetry  = read_telemetry(controller_serial)   # 250-byte ControllerTelemetry_t packet
     rgb_frame  = camera_buffer.latest_frame()        # Overhead, pre-captured
 
     # --- DETECT (18ms) ---
@@ -893,7 +901,7 @@ def inference_loop(teensy_serial, camera_buffer, models, state):
     # --- 3D POSE (3ms) ---
     # X, Y from overhead camera intrinsics
     X, Y = overhead_xy(target_det.centroid, state.camera_K, state.Z_table)
-    # Z from wrist ToF center zones (pre-buffered on Teensy, 0ms wait)
+    # Z from wrist ToF center zones (pre-buffered on ESP32, 0ms wait)
     Z = wrist_tof_z(telemetry.tof_grid, state.wrist_tof_offset)
     pick_pose_3d = compute_pick_pose_base_frame(X, Y, Z, state.T_cam_base)
 
@@ -919,7 +927,7 @@ def inference_loop(teensy_serial, camera_buffer, models, state):
     )
 
     # --- TRANSMIT (1ms) ---
-    send_command(teensy_serial, target_joints, state.skill_state)
+    send_command(controller_serial, target_joints, state.skill_state)
 
     elapsed = (time.monotonic() - t0) * 1000
     if elapsed > 125:
@@ -943,11 +951,11 @@ def inference_loop(teensy_serial, camera_buffer, models, state):
 
 | Contact Detection Method | Latency |
 |---|---|
-| ISM330DHCX vibration (IMU oracle) | **~3ms signal window, ≤20ms Teensy-loop trigger target** |
+| ISM330DHCX vibration (IMU oracle) | **~3ms signal window, ≤20ms ESP32 control-loop trigger target** |
 | STS3215 load threshold (confirmation) | ≤ 200ms |
 | Fused oracle (IMU-first, load-confirm) | **≤20ms trigger target, ≤200ms confirm** |
 
-The nominal target remains 125ms for 8Hz inference, but the final VLA policy latency must be measured on the Raspberry Pi 5 with the exported checkpoint and quantization settings. If SmolVLA-450M exceeds the budget, the deployment should switch to Octo-small + LoRA or lower the VLA update rate while preserving the Teensy's 50Hz interpolation loop. The Teensy's waypoint interpolation ensures that an occasional overrun cycle does not produce a physical control glitch — the arm continues executing the previous waypoint chunk smoothly.
+The nominal target remains 125ms for 8Hz inference, but the final VLA policy latency must be measured on the Raspberry Pi 5 with the exported checkpoint and quantization settings. If SmolVLA-450M exceeds the budget, the deployment should switch to Octo-small + LoRA or lower the VLA update rate while preserving the ESP32's 50Hz interpolation loop. The ESP32's waypoint interpolation ensures that an occasional overrun cycle does not produce a physical control glitch — the arm continues executing the previous waypoint chunk smoothly.
 
 ---
 
@@ -955,13 +963,13 @@ The nominal target remains 125ms for 8Hz inference, but the final VLA policy lat
 
 ### 13.1 Data Collection via Teleoperation
 
-Teleoperation is performed using a gamepad-controlled interface streaming target joint positions to the Teensy at 50Hz. The operator performs pick-place demonstrations on a tabletop workspace with three object types:
+Teleoperation is performed using a gamepad-controlled interface streaming target joint positions to the ESP32 at 50Hz. The operator performs pick-place demonstrations on a tabletop workspace with three object types:
 
 - Colored wooden blocks (30×30×30mm, red, blue, yellow)
 - Cylindrical objects (25mm diameter, 50mm height)
 - Small rectangular trays (100×60mm) as placement targets
 
-For each of three task types (single-object pick-place, block stacking, color-sorted pick-place), 10 demonstrations are collected, yielding 30 total demonstrations. Each demonstration is recorded with synchronized: overhead RGB frames at 30fps, Teensy telemetry (servo pos/load/speed/temp, ISM330DHCX IMU summary, latest VL53L5CX wrist ToF frame) at 50Hz, ToF frame timestamps at 15Hz, and the natural language instruction string.
+For each of three task types (single-object pick-place, block stacking, color-sorted pick-place), 10 demonstrations are collected, yielding 30 total demonstrations. Each demonstration is recorded with synchronized: overhead RGB frames at 30fps, ESP32 ControllerTelemetry_t (servo pos/load/speed/temp, ISM330DHCX IMU summary, latest VL53L5CX wrist ToF frame) at 50Hz, ToF frame timestamps at 15Hz, and the natural language instruction string.
 
 Average demonstration length: 8 seconds. Telemetry volume is approximately 30 demos × 8s × 50Hz = 12,000 telemetry samples total. At 250 bytes per telemetry packet, raw telemetry is approximately 3.0MB total before logs, metadata, and compression. The dominant dataset size comes from RGB frames: 30 demos × 8s × 30fps = 7,200 frames. If stored as compressed JPEG/PNG frames, the expected total dataset size is roughly several hundred MB depending on quality settings; if stored as raw 640×480 RGB, it is approximately 6.6GB.
 
@@ -1042,13 +1050,13 @@ Rerun 20 Task 1 trials with the camera placed behind and above the arm base inst
 
 ## 15. System Integration and Software Stack
 
-### 15.1 Teensy 4.1 Firmware
+### 15.1 ESP32-WROOM-32 Firmware
 
-Language: C++17 with Teensyduino framework.
+Language: C++17 with espressif32 Arduino framework (PlatformIO, `board = esp32dev`). FreeRTOS dual-core task architecture: `control_task` on Core 1 at 50Hz, `comms_task` on Core 0 for USB serial. WiFi/BT disabled at startup.
 
 ```
 firmware/
-├── main.cpp                  # Main loop, 50Hz timer ISR
+├── main.cpp                  # FreeRTOS task creation, setup, WiFi/BT disable
 ├── servo_bus.cpp/.h          # STS3215 half-duplex UART driver
 ├── ism330dhcx_driver.cpp/.h  # ISM330DHCX SPI driver + 9kB FIFO management
 ├── tof_driver.cpp/.h         # VL53L5CX I2C driver (wrist-mounted)
@@ -1079,7 +1087,7 @@ rpi5_inference/
 │   ├── ik_solver.py               # Closed-form IK for J0-J2 positioning + gripper state
 │   └── safety_filter.py           # Workspace + singularity checks
 ├── comms/
-│   └── teensy_serial.py           # USB serial packet encode/decode
+│   └── controller_serial.py       # USB serial packet encode/decode (ControllerTelemetry_t)
 ├── dashboard/
 │   └── gui.py                     # Live visualization dashboard
 ├── calibration/
@@ -1165,7 +1173,7 @@ Engineering universities across India operate robotics laboratories with constra
 | Deliverable | Description | Target Date |
 |---|---|---|
 | Calibrated hardware system | Fully assembled arm, overhead camera post, wrist ToF bracket, end-effector IMU mount, verified serial bus | Week 2 |
-| Teensy firmware | Complete C++ firmware with ISM330DHCX, VL53L5CX, STS3215 drivers and control loop | Week 3 |
+| ESP32 firmware | Complete C++17 firmware with ISM330DHCX, VL53L5CX, STS3215 drivers and FreeRTOS dual-core control loop | Week 3 |
 | Calibration scripts | Camera intrinsic, overhead height, wrist ToF offset, camera-to-base transform | Week 3 |
 | Teleoperation dataset | 30 raw synchronized demonstrations, plus generated skill labels from the AI/ML segmentation pipeline, open-sourced on GitHub | Week 4 |
 | Trained model checkpoint | SmolVLA-450M + LoRA checkpoint, Octo-small fallback checkpoint if needed, reproducible training script | Week 5 |
@@ -1182,11 +1190,11 @@ Engineering universities across India operate robotics laboratories with constra
 
 This project proposes a complete engineering plan for deploying Vision-Language-Action control on low-cost robotic hardware with practical safety constraints and multi-modal sensing. The central planned contributions are:
 
-**Architectural:** A hierarchical VLA decomposition (skill prediction → action generation → IK safety) that makes sample-efficient learning on 4-DOF arms tractable, paired with a dual-processor compute split (Teensy 4.1 for deterministic 50Hz real-time control, Raspberry Pi 5 for 8Hz ML inference) that eliminates OS jitter from the servo control loop.
+**Architectural:** A hierarchical VLA decomposition (skill prediction → action generation → IK safety) that makes sample-efficient learning on 4-DOF arms tractable, paired with a dual-processor compute split (ESP32-WROOM-32 running FreeRTOS Core 1 for 50Hz real-time servo control, Raspberry Pi 5 for 8Hz ML inference) that eliminates OS jitter from the servo control loop.
 
 **Sensing and Placement:** A hybrid sensor placement strategy — Pi Camera 3 fixed overhead for occlusion-resistant top-down detection, VL53L5CX wrist-mounted in 8×8 15Hz mode for direct grasp depth measurement, ISM330DHCX end-effector-mounted for high-frequency contact vibration detection — that maximizes sensing accuracy while reducing the mechanical failure modes associated with alternative placements.
 
-**Contact Detection:** A cost-effective end-effector contact detection method using ISM330DHCX gyroscope vibration analysis at 6.667kHz ODR, producing an approximately 3.0ms signal window and a ≤20ms Teensy-loop trigger target before slower STS3215 load confirmation. This aims to eliminate the need for force-torque sensors costing $500–2000.
+**Contact Detection:** A cost-effective end-effector contact detection method using ISM330DHCX gyroscope vibration analysis at 6.667kHz ODR, producing an approximately 3.0ms signal window and a ≤20ms ESP32 control-loop trigger target before slower STS3215 load confirmation. This aims to eliminate the need for force-torque sensors costing $500–2000.
 
 **System integration:** A documented VLA pipeline for the STS3215 serial-bus servo ecosystem, exploiting onboard telemetry (position, load, speed, temperature) as multi-modal state observations that reduce dependence on external sensing.
 

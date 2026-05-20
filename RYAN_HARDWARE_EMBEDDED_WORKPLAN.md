@@ -2,6 +2,7 @@
 
 **Project:** Vision–Language–Action Control for 4-DOF Robotic Manipulation  
 **Role:** Hardware Engineer / Embedded Systems / Sensor Fusion  
+**MCU:** ESP32-WROOM-32 dev module (Xtensa LX6 dual-core @ 240MHz, FreeRTOS, Arduino + espressif32)
 **Reference Document:** `VLA_Robotic_Arm_Project_Report_FINAL.md` (read this fully before starting)  
 **Collaborator:** Your friend handles everything AI/ML — training, inference pipeline, dashboard.  
 **Your job ends where your friend's begins:** you deliver calibrated hardware + working firmware + raw synchronized teleoperation recordings. Your friend consumes those recordings, generates skill labels, trains models, and runs evaluation.
@@ -14,7 +15,7 @@
 |---|---|
 | Mechanical | Arm assembly, sensor mounting brackets, overhead camera post |
 | Electrical | Power architecture, servo bus wiring, sensor wiring |
-| Firmware | Teensy 4.1 C++ firmware (all drivers, control loop, contact oracle, safety) |
+| Firmware | ESP32-WROOM-32 C++17 firmware (all drivers, FreeRTOS dual-core loop, contact oracle, safety) |
 | Calibration | All 4 calibration scripts (camera intrinsic, Z_table, wrist ToF offset, T_cam_base) |
 | Teleoperation | Gamepad teleoperation interface + dataset recorder |
 | Simulation | Python kinematic simulator for IK/FK testing without hardware |
@@ -29,10 +30,10 @@ These are hard dependencies. Deliver them on time or your friend cannot proceed.
 ### 1. Communication Protocol (must be agreed before either of you writes code)
 Two packed binary structs over USB serial at 2Mbps. These are **locked** — any change requires coordination with your friend.
 
-**Teensy → RPi5 (250 bytes, sent at 50Hz):**
+**ESP32 → RPi5 (250 bytes, sent at 50Hz):**
 ```c
 typedef struct __attribute__((packed)) {
-    uint32_t timestamp_us;      // Teensy microsecond counter (from systick)
+    uint32_t timestamp_us;      // ESP32 microsecond counter (from micros())
     float    servo_pos[5];      // Servo positions in degrees [J0, J1a, J1b, J2, J3]
     float    servo_load[5];     // Normalized load 0.0–1.0 [same order]
     float    servo_speed[5];    // Speed in degrees/second [same order]
@@ -47,10 +48,10 @@ typedef struct __attribute__((packed)) {
     float    contact_rms;       // Current 20-sample gyro RMS (for friend's dashboard)
     uint8_t  safety_clamped;    // 1 if any joint was clamped this cycle
     uint16_t checksum;          // Simple sum of all preceding bytes, truncated to 16-bit
-} TeensyTelemetry_t;  // 250 bytes packed — verify with sizeof() in firmware
+} ControllerTelemetry_t;  // 250 bytes packed — verify with sizeof() in firmware
 ```
 
-**RPi5 → Teensy (20 bytes, received at 8Hz):**
+**RPi5 → ESP32 (20 bytes, received at 8Hz):**
 ```c
 typedef struct __attribute__((packed)) {
     float   target_arm[3];    // Target degrees for [J0, J1, J2] — arm joints only
@@ -81,7 +82,7 @@ HDF5 internal structure (per file):
     servo_speed     shape=(N, 5)  dtype=float32  units: deg/s
     servo_temp      shape=(N, 5)  dtype=float32  units: Celsius
     tof_grid        shape=(N, 64) dtype=uint16   units: mm
-    tof_timestamp_us shape=(N,)   dtype=uint32   units: Teensy microseconds
+    tof_timestamp_us shape=(N,)   dtype=uint32   units: ESP32 microseconds
     tof_resolution  shape=(N,)    dtype=uint8    value: 64 for 8×8 mode
     tof_valid       shape=(N,)    dtype=uint8
     imu_gyro        shape=(N, 3)  dtype=float32  units: deg/s
@@ -90,7 +91,7 @@ HDF5 internal structure (per file):
     contact_rms     shape=(N,)    dtype=float32
     safety_clamped  shape=(N,)    dtype=uint8
     checksum         shape=(N,)    dtype=uint16
-    timestamps_us   shape=(N,)    dtype=uint32   # Teensy timestamps
+    timestamps_us   shape=(N,)    dtype=uint32   # ESP32 timestamps
 /video/
     rgb_frames      shape=(M, 480, 640, 3) dtype=uint8  # overhead camera frames
     frame_timestamps_us shape=(M,) dtype=uint64 units: microseconds in same timebase as telemetry
@@ -139,12 +140,12 @@ Before starting, verify you have every part:
 | Component | Qty | Notes |
 |---|---|---|
 | STS3215 servo (12V variant) | 5 | Verify 12V rated — there is also a 7.4V variant; do NOT mix |
-| Teensy 4.1 | 1 | |
+| ESP32-WROOM-32 dev module | 1 | 38-pin variant, USB via onboard CH340 or CP2102 bridge |
 | Raspberry Pi 5 (8GB) | 1 | |
 | ISM330DHCX breakout board | 1 | SparkFun or Adafruit; must expose SPI pins |
 | VL53L5CX breakout board | 1 | ST or Pololu; must expose I2C pins and LPn/INT |
 | Pi Camera Module 3 | 1 | With CSI cable long enough to reach post |
-| STS3215 UART TTL adapter | 1 | Or use Teensy's built-in UART with TX/RX merged via 74HC126 or similar |
+| STS3215 UART TTL adapter | 1 | Or wire ESP32 UART2 (GPIO16/17) directly via 74HC126 half-duplex buffer |
 | 12V 10A power supply | 1 | Bench supply or brick |
 | 12V→5V buck converter (5A rated) | 1 | For RPi5 |
 | 1000µF 16V electrolytic capacitor | 1 | Across servo power terminal |
@@ -198,52 +199,58 @@ Also set each servo's baud rate to **1Mbps** (register 0x04 = 0x00 in Feetech pr
                 │                                        │
          STS3215 bus                                     │
          (all 5 servos)                                  ▼
-                                                    Teensy 4.1
+                                                   ESP32-WROOM-32
                                                   (via USB from RPi5)
 ```
 
 - **CRITICAL:** Servo rail and compute rail must share ONLY a common ground at one point (the power supply negative terminal). Do not connect servo 12V to compute 12V anywhere.
 - The 1000µF cap goes directly across the servo power terminals at the JST or screw terminal block, as close to the first servo in the chain as possible.
+- The ESP32 is powered from the RPi5 USB port (5V via the dev board's onboard regulator). Do NOT connect the ESP32 VIN to the 12V servo rail.
 
-**Teensy 4.1 Pin Assignments:**
+**ESP32-WROOM-32 Pin Assignments:**
 
-| Teensy Pin | Function | Connects To |
+> **Forbidden pins — never use for I/O:**
+> - GPIO6–11: connected to internal SPI flash — wiring these will brick the board
+> - GPIO34, 35, 36, 39: input-only — cannot be driven as outputs
+> - GPIO0, 2, 12, 15: boot strapping pins — avoid for critical I/O
+
+| ESP32 GPIO | Function | Connects To |
 |---|---|---|
-| TX1 (pin 1) | STS3215 bus TX | Servo bus data line (via half-duplex mux) |
-| RX1 (pin 0) | STS3215 bus RX | Servo bus data line (via half-duplex mux) |
-| Pin 2 | TX_ENABLE | Direction control for half-duplex (HIGH=TX, LOW=RX) |
-| SPI0 MOSI (pin 11) | ISM330DHCX MOSI | IMU SDI |
-| SPI0 MISO (pin 12) | ISM330DHCX MISO | IMU SDO |
-| SPI0 SCK (pin 13) | ISM330DHCX SCK | IMU SCL |
-| Pin 10 | ISM330DHCX CS | IMU CS (active LOW) |
-| Wire1 SDA (pin 17) | VL53L5CX SDA | ToF SDA |
-| Wire1 SCL (pin 16) | VL53L5CX SCL | ToF SCL |
-| Pin 14 | VL53L5CX LPn | ToF power enable (HIGH=powered) |
-| Pin 15 | VL53L5CX INT | ToF data-ready interrupt (active LOW) |
-| USB | RPi5 communication | USB-A on RPi5 |
+| GPIO17 (UART2 TX) | STS3215 bus TX | Servo bus data line (via half-duplex mux) |
+| GPIO16 (UART2 RX) | STS3215 bus RX | Servo bus data line (via half-duplex mux) |
+| GPIO4 | TX_ENABLE | Direction control for half-duplex (HIGH=TX, LOW=RX) |
+| GPIO23 (VSPI MOSI) | ISM330DHCX MOSI | IMU SDI |
+| GPIO19 (VSPI MISO) | ISM330DHCX MISO | IMU SDO |
+| GPIO18 (VSPI SCK) | ISM330DHCX SCK | IMU SCL |
+| GPIO5 | ISM330DHCX CS | IMU CS (active LOW) |
+| GPIO21 (Wire SDA) | VL53L5CX SDA | ToF SDA |
+| GPIO22 (Wire SCL) | VL53L5CX SCL | ToF SCL |
+| GPIO27 | VL53L5CX LPn | ToF power enable (HIGH=powered) |
+| GPIO26 | VL53L5CX INT | ToF data-ready interrupt (active LOW) |
+| USB (via CH340/CP2102) | RPi5 communication | USB-A on RPi5 |
 
 **Servo Bus Half-Duplex Wiring:**
-The STS3215 uses a single-wire half-duplex bus. Wire TX1 and RX1 together through a 74HC126 tri-state buffer (or equivalent), with TX_ENABLE controlling direction. Alternatively, connect TX1 to the bus data line and RX1 to the bus data line through a 1kΩ resistor; set TX_ENABLE to tri-state the TX driver when receiving. Check the Teensyduino documentation for `Serial1.setMode()` half-duplex support if available.
+The STS3215 uses a single-wire half-duplex bus. Wire GPIO17 (TX) and GPIO16 (RX) together through a 74HC126 tri-state buffer (or equivalent), with GPIO4 (TX_ENABLE) controlling direction. Alternatively, connect GPIO17 to the bus data line and GPIO16 to the bus data line through a 1kΩ resistor; when receiving, the firmware pulls GPIO4 LOW to tri-state the TX output. The ESP32 Arduino `Serial2` object is initialized with explicit pin arguments so no hardware remapping is needed.
 
-**IMU Wiring (SPI):**
-| ISM330DHCX Pin | Teensy Pin | Wire Color (suggestion) |
+**IMU Wiring (SPI — VSPI bus):**
+| ISM330DHCX Pin | ESP32 GPIO | Wire Color (suggestion) |
 |---|---|---|
 | VCC | 3.3V | Red |
 | GND | GND | Black |
-| SDI (MOSI) | Pin 11 | Blue |
-| SDO (MISO) | Pin 12 | Yellow |
-| SCL (SCK) | Pin 13 | Green |
-| CS | Pin 10 | Orange |
+| SDI (MOSI) | GPIO23 | Blue |
+| SDO (MISO) | GPIO19 | Yellow |
+| SCL (SCK) | GPIO18 | Green |
+| CS | GPIO5 | Orange |
 
-**ToF Wiring (I2C):**
-| VL53L5CX Pin | Teensy Pin | Wire Color (suggestion) |
+**ToF Wiring (I2C — Wire bus):**
+| VL53L5CX Pin | ESP32 GPIO | Wire Color (suggestion) |
 |---|---|---|
 | VDD | 3.3V | Red |
 | GND | GND | Black |
-| SDA | Pin 17 | Blue |
-| SCL | Pin 16 | Yellow |
-| LPn | Pin 14 | Green |
-| INT | Pin 15 | White |
+| SDA | GPIO21 | Blue |
+| SCL | GPIO22 | Yellow |
+| LPn | GPIO27 | Green |
+| INT | GPIO26 | White |
 
 Route IMU and ToF wires along the arm linkages using cable clips. Leave generous slack at each joint — wires must not go taut during full range of motion. Use silicone-insulated wire specifically because it tolerates repeated flexing.
 
@@ -251,18 +258,19 @@ Route IMU and ToF wires along the arm linkages using cable clips. Leave generous
 
 - [ ] All 5 servos addressable by unique ID on the 1Mbps bus
 - [ ] Servo holding positions without drift, load readings reasonable (0–30% at rest)
-- [ ] ISM330DHCX WHO_AM_I register reads 0x6B over SPI (write a 5-line Arduino sketch to verify)
+- [ ] ISM330DHCX WHO_AM_I register reads 0x6B over SPI (write a 5-line Arduino sketch targeting esp32dev to verify)
 - [ ] VL53L5CX returns valid distance data (a flat board at 200mm should read 195–210mm)
 - [ ] Pi Camera 3 visible at /dev/video0 on RPi5, streaming at 640×480
 - [ ] No brownouts: run all 5 servos simultaneously through ±30° motion; RPi5 SSH session must not drop
 - [ ] Overhead camera post installed and level; table surface completely visible in frame
+- [ ] ESP32 visible on RPi5 as a USB serial device (`/dev/ttyUSB0` or `/dev/ttyACM0`) when connected
 
 ---
 
-## Phase 2: Teensy 4.1 Firmware (Week 2–3)
+## Phase 2: ESP32-WROOM-32 Firmware (Week 2–3)
 
 ### Goal
-A complete Teensy firmware that runs a deterministic 50Hz main loop delivering:
+A complete ESP32 firmware that runs a deterministic 50Hz control loop delivering:
 - Full 5-servo telemetry + IMU + ToF data to RPi5 at 50Hz over USB serial
 - Accurate contact detection flag from ISM330DHCX
 - Smooth waypoint interpolation from 8Hz RPi5 commands to 50Hz servo writes
@@ -270,19 +278,22 @@ A complete Teensy firmware that runs a deterministic 50Hz main loop delivering:
 
 ### 2.1 Project Setup
 
-Use PlatformIO (recommended) or Arduino IDE with Teensyduino add-on.
+Use PlatformIO (recommended). The ESP32 Arduino core (`espressif32`) is well-supported and provides the same Arduino-compatible API surface you would expect from an Arduino framework target.
 
 `platformio.ini`:
 ```ini
-[env:teensy41]
-platform = teensy
-board = teensy41
-framework = arduino
-build_flags = -O2 -std=c++17
+[env:esp32dev]
+platform    = espressif32
+board       = esp32dev
+framework   = arduino
+build_flags = -O2 -std=c++17 -DCORE_DEBUG_LEVEL=0
+monitor_speed = 2000000
 lib_deps =
     Wire
     SPI
 ```
+
+> **Note on USB baud rate:** The ESP32 communicates with the PC/RPi5 via an onboard CH340 or CP2102 USB-UART bridge. Both chips support 2Mbps. The `monitor_speed` setting above matches the firmware `USB_BAUD` define. If you see garbled output, confirm your specific bridge chip supports 2Mbps; a fallback to 921600 baud is safe for debugging (update both `monitor_speed` and `USB_BAUD` consistently).
 
 File structure:
 ```
@@ -306,9 +317,11 @@ firmware/
 ```c
 #pragma once
 
-// Servo bus
+// ── Servo bus (UART2 on ESP32) ───────────────────────────────────────────────
 #define SERVO_BAUD        1000000UL
-#define SERVO_TX_ENABLE   2        // GPIO pin, HIGH=TX, LOW=RX
+#define SERVO_TX_PIN      17       // GPIO17 = UART2 TX → servo bus data line
+#define SERVO_RX_PIN      16       // GPIO16 = UART2 RX ← servo bus data line
+#define SERVO_TX_ENABLE   4        // GPIO4, HIGH=TX mode, LOW=RX mode
 #define SERVO_COUNT       5
 #define SERVO_ID_J0       0x01
 #define SERVO_ID_J1A      0x02    // Coupled shoulder servo A
@@ -316,36 +329,43 @@ firmware/
 #define SERVO_ID_J2       0x04
 #define SERVO_ID_J3       0x05    // Gripper
 
-// ISM330DHCX SPI
-#define IMU_SPI_CS        10
+// ── ISM330DHCX (VSPI bus) ────────────────────────────────────────────────────
+// VSPI defaults: MOSI=GPIO23, MISO=GPIO19, SCK=GPIO18 — no remapping needed
+#define IMU_SPI_CS        5        // GPIO5
 #define IMU_SPI_FREQ      10000000UL  // 10MHz
 
-// VL53L5CX I2C
-#define TOF_SDA           17
-#define TOF_SCL           16
-#define TOF_LPN           14       // Power enable, HIGH=powered
-#define TOF_INT           15       // Data-ready interrupt, active LOW
+// ── VL53L5CX (Wire / I2C0 bus) ───────────────────────────────────────────────
+#define TOF_SDA           21       // GPIO21
+#define TOF_SCL           22       // GPIO22
+#define TOF_LPN           27       // GPIO27, power enable, HIGH=powered
+#define TOF_INT           26       // GPIO26, data-ready interrupt, active LOW
 #define TOF_I2C_ADDR      0x52
 #define TOF_UPDATE_HZ     15
 
-// Control loop
+// ── Control loop ─────────────────────────────────────────────────────────────
 #define CONTROL_HZ        50
-#define CONTROL_PERIOD_US 20000   // 20ms
+#define CONTROL_PERIOD_MS 20       // 20ms period for vTaskDelayUntil
 
-// Packet sizes
+// ── Packet sizes ─────────────────────────────────────────────────────────────
 #define TELEMETRY_SIZE    250
 #define COMMAND_SIZE      20
 
-// Temperature warning threshold
+// ── Temperature thresholds ───────────────────────────────────────────────────
 #define TEMP_WARN_C       65.0f
-#define TEMP_CUTOFF_C     80.0f   // Servo hardware limit, firmware also enforces
+#define TEMP_CUTOFF_C     80.0f
 
-// Contact oracle
+// ── Contact oracle ───────────────────────────────────────────────────────────
 #define CONTACT_WINDOW    20      // samples at 6667Hz = 3.0ms
 #define CONTACT_THRESHOLD 3.5f   // deg/s RMS, calibrate empirically
 
-// USB Serial baud (symbolic — USB FS ignores baud but set anyway)
+// ── USB Serial baud (via onboard CH340/CP2102 bridge) ────────────────────────
 #define USB_BAUD          2000000UL
+
+// ── FreeRTOS task config ─────────────────────────────────────────────────────
+#define CONTROL_TASK_STACK  8192  // bytes
+#define COMMS_TASK_STACK    4096  // bytes
+#define CONTROL_TASK_PRIO   10    // higher than comms
+#define COMMS_TASK_PRIO     5
 ```
 
 ### 2.3 STS3215 Servo Bus Driver
@@ -415,13 +435,17 @@ bool servo_poll_all(ServoTelemetry* telemetry);
 // Direction control: toggle TX_ENABLE before/after each bus transaction
 // HIGH before writing, LOW before expecting reply, wait for reply, then done
 
+// servo_bus.cpp must call Serial2.begin() during servo_bus_init():
+//   Serial2.begin(SERVO_BAUD, SERIAL_8N1, SERVO_RX_PIN, SERVO_TX_PIN);
+// ESP32 Arduino lets you specify RX/TX pins explicitly — no hardware remapping needed.
+
 static void begin_tx() {
     digitalWrite(SERVO_TX_ENABLE, HIGH);
     delayMicroseconds(2);  // propagation delay
 }
 
 static void begin_rx() {
-    Serial1.flush();                // ensure TX buffer drained
+    Serial2.flush();                // ensure TX buffer drained
     digitalWrite(SERVO_TX_ENABLE, LOW);
     delayMicroseconds(2);
 }
@@ -441,15 +465,15 @@ static bool send_read(uint8_t id, uint8_t start_addr, uint8_t data_len,
     pkt[7] = ~(id + 4 + 0x02 + start_addr + data_len) & 0xFF;
 
     begin_tx();
-    Serial1.write(pkt, 8);
+    Serial2.write(pkt, 8);
     begin_rx();
 
     // Wait for (6 + data_len) bytes: 0xFF 0xFF ID LEN ERR DATA... CHECKSUM
     uint32_t deadline = micros() + 5000;
     uint8_t idx = 0;
     while (micros() < deadline && idx < response_len) {
-        if (Serial1.available()) {
-            response_buf[idx++] = Serial1.read();
+        if (Serial2.available()) {
+            response_buf[idx++] = Serial2.read();
         }
     }
     return (idx == response_len);
@@ -485,10 +509,10 @@ void servo_sync_write(const uint8_t* ids, const float* positions_deg, uint8_t co
     pkt[pos++] = ~checksum & 0xFF;
 
     begin_tx();
-    Serial1.write(pkt, pos);
+    Serial2.write(pkt, pos);
     // No response expected for sync write (broadcast)
     // Wait for transmission to complete before toggling direction
-    Serial1.flush();
+    Serial2.flush();
     begin_rx();
 }
 ```
@@ -675,8 +699,8 @@ void tof_init() {
     digitalWrite(TOF_LPN, HIGH);
     delay(100);  // boot time
 
-    Wire1.begin();
-    Wire1.setClock(400000);  // 400kHz I2C
+    Wire.begin(TOF_SDA, TOF_SCL);   // GPIO21=SDA, GPIO22=SCL
+    Wire.setClock(400000);          // 400kHz fast mode
 
     dev.platform.address = TOF_I2C_ADDR;
 
@@ -727,9 +751,9 @@ bool tof_check_ready() {
 
 **Note on zone indexing:** In 8×8 mode, zone index maps as: `idx = row * 8 + col`. Center zones (3,3), (3,4), (4,3), (4,4) correspond to indices 27, 28, 35, 36. These are the grasp depth measurement zones.
 
-### 2.6 Contact Oracle (C++ on Teensy)
+### 2.6 Contact Oracle (C++ on ESP32)
 
-This is the real contact oracle — it runs at the full FIFO read rate on the Teensy, NOT at 50Hz. The Python class in the main report is only a monitoring visualization on the RPi5 side; the actual fast detection is here.
+This is the real contact oracle — it runs at the full FIFO read rate on the ESP32 (called inside `imu_fifo_read_batch()` on every FIFO word), NOT at 50Hz. The Python class in the main report is only a monitoring visualization on the RPi5 side; the actual fast detection is here.
 
 **contact_oracle.h:**
 ```c
@@ -797,7 +821,7 @@ void contact_oracle_reset()     { triggered = false; event_flag = false; buf_cou
 
 ### 2.7 Waypoint Interpolation
 
-The RPi5 sends target positions at 8Hz (every 125ms). The Teensy interpolates at 50Hz (every 20ms), producing 6–7 smooth intermediate positions per RPi5 command.
+The RPi5 sends target positions at 8Hz (every 125ms). The ESP32 `control_task` interpolates at 50Hz (every 20ms via `vTaskDelayUntil`), producing 6–7 smooth intermediate positions per RPi5 command.
 
 **waypoint_interp.h:**
 ```c
@@ -878,11 +902,11 @@ void safety_clamp(float* joints, bool* clamped) {
 #include "config.h"
 
 // Packet types (match the structs in the main report exactly)
-// IMPORTANT: sizeof(TeensyTelemetry_t) must == 250
+// IMPORTANT: sizeof(ControllerTelemetry_t) must == 250
 // IMPORTANT: sizeof(RPiCommand_t) must == 20
 
 void comms_init();
-void comms_send_telemetry(const TeensyTelemetry_t* pkt);
+void comms_send_telemetry(const ControllerTelemetry_t* pkt);
 bool comms_receive_command(RPiCommand_t* cmd_out);  // Returns true if valid packet received
 ```
 
@@ -898,10 +922,10 @@ static uint16_t compute_checksum(const uint8_t* data, size_t len) {
     return sum;
 }
 
-void comms_send_telemetry(const TeensyTelemetry_t* pkt) {
+void comms_send_telemetry(const ControllerTelemetry_t* pkt) {
     // Fill checksum field in the packet before sending
     // The checksum covers all bytes except the checksum field itself
-    TeensyTelemetry_t local = *pkt;
+    ControllerTelemetry_t local = *pkt;
     local.checksum = compute_checksum((uint8_t*)&local, sizeof(local) - sizeof(local.checksum));
     Serial.write((uint8_t*)&local, sizeof(local));
 }
@@ -925,8 +949,25 @@ bool comms_receive_command(RPiCommand_t* cmd_out) {
 
 ### 2.10 Main Control Loop (main.cpp)
 
+The ESP32 runs FreeRTOS. Instead of a bare-metal `loop()`, all work is split into two tasks pinned to separate cores. `setup()` initialises peripherals, creates both tasks, then deletes itself (the Arduino loop task). `loop()` is left empty and never reached.
+
+**Architecture overview:**
+
+| Core | Task | Priority | Stack |
+|---|---|---|---|
+| Core 1 (app_cpu) | `control_task` — 50Hz servo loop | 10 | 8192 B |
+| Core 0 (pro_cpu) | `comms_task` — USB serial to RPi5 | 5 | 4096 B |
+
+WiFi and BT are disabled in `setup()` before anything else. This removes all RF interrupt sources from Core 0.
+
+**Full main.cpp:**
+
 ```c
 #include <Arduino.h>
+#include <WiFi.h>                      // for WiFi.mode(WIFI_OFF)
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 #include "config.h"
 #include "servo_bus.h"
 #include "ism330dhcx_driver.h"
@@ -936,130 +977,202 @@ bool comms_receive_command(RPiCommand_t* cmd_out) {
 #include "safety_layer.h"
 #include "comms.h"
 
-// Global telemetry and command structs
-static TeensyTelemetry_t telemetry = {};
-static RPiCommand_t      last_cmd  = {};
-static float             current_joints[4]  = {0, 0, 0, 0};
-static float             last_cmd_joints[4] = {0, 0, 0, 0};
-static bool              have_first_cmd = false;
+// ── Shared state (protected by FreeRTOS mutexes) ─────────────────────────────
+static ControllerTelemetry_t g_telemetry = {};
+static RPiCommand_t           g_last_cmd = {};
+static SemaphoreHandle_t      g_telemetry_mutex;
+static SemaphoreHandle_t      g_command_mutex;
 
-static uint32_t last_loop_us = 0;
+// ── Core 1: 50Hz Control Task ─────────────────────────────────────────────────
+void control_task(void* pvParameters) {
+    TickType_t lastWakeTime = xTaskGetTickCount();
+    const TickType_t period = pdMS_TO_TICKS(CONTROL_PERIOD_MS);  // 20ms = 50Hz
 
-void setup() {
-    Serial.begin(USB_BAUD);   // USB serial to RPi5
+    ControllerTelemetry_t local_telem  = {};
+    float current_joints[4]  = {0, 0, 0, 0};
+    float last_cmd_joints[4] = {0, 0, 0, 0};
+    bool  have_first_cmd     = false;
 
-    safety_init();
-    servo_bus_init();
-    imu_init();
-    tof_init();
-    contact_oracle_init(CONTACT_THRESHOLD);
-    comms_init();
+    while (true) {
+        // === STEP 1: IMU FIFO read (processes all queued samples this cycle) ===
+        imu_fifo_read_batch();  // calls contact_oracle_push() for every gyro sample
 
-    last_loop_us = micros();
-    Serial.println("Teensy ready.");
-}
-
-void loop() {
-    // Enforce 20ms period
-    while (micros() - last_loop_us < CONTROL_PERIOD_US) { /* busy wait */ }
-    last_loop_us = micros();
-
-    // === TASK 1: IMU FIFO read (highest priority) ===
-    imu_fifo_read_batch();  // Processes all FIFO samples, calls contact_oracle_push internally
-
-    // === TASK 2: ToF frame check ===
-    if (tof_check_ready()) {
-        ToFFrame frame = tof_get_latest();
-        memcpy(telemetry.tof_grid, frame.distances_mm, 64 * sizeof(uint16_t));
-        telemetry.tof_timestamp_us = frame.capture_timestamp_us;
-        telemetry.tof_valid = frame.valid;
-        telemetry.tof_resolution = 64;
-    }
-    // If not ready, telemetry.tof_grid keeps previous frame (tof_valid stays unchanged)
-
-    // === TASK 3: Servo telemetry (all 5 physical servos once per 20ms cycle) ===
-    {
-        static const uint8_t ids[5] = {
-            SERVO_ID_J0, SERVO_ID_J1A, SERVO_ID_J1B, SERVO_ID_J2, SERVO_ID_J3
-        };
-        for (uint8_t i = 0; i < SERVO_COUNT; i++) {
-            ServoTelemetry st = servo_read_telemetry(ids[i]);
-            telemetry.servo_pos[i]   = st.pos_deg;
-            telemetry.servo_load[i]  = st.load_norm;
-            telemetry.servo_speed[i] = st.speed_dps;
-            telemetry.servo_temp[i]  = st.temp_c;
+        // === STEP 2: ToF frame check (interrupt-driven, fires ~15Hz) ===
+        if (tof_check_ready()) {
+            ToFFrame frame = tof_get_latest();
+            memcpy(local_telem.tof_grid, frame.distances_mm, 64 * sizeof(uint16_t));
+            local_telem.tof_timestamp_us = frame.capture_timestamp_us;
+            local_telem.tof_valid        = frame.valid;
+            local_telem.tof_resolution   = 64;
         }
-    }
+        // If no new frame, tof_grid keeps the previous frame (tof_valid unchanged)
 
-    // === TASK 4: Receive command from RPi5 ===
-    RPiCommand_t incoming;
-    if (comms_receive_command(&incoming)) {
+        // === STEP 3: Servo telemetry (all 5 servos, once per 20ms) ===
+        {
+            static const uint8_t ids[5] = {
+                SERVO_ID_J0, SERVO_ID_J1A, SERVO_ID_J1B, SERVO_ID_J2, SERVO_ID_J3
+            };
+            for (uint8_t i = 0; i < SERVO_COUNT; i++) {
+                ServoTelemetry st = servo_read_telemetry(ids[i]);
+                local_telem.servo_pos[i]   = st.pos_deg;
+                local_telem.servo_load[i]  = st.load_norm;
+                local_telem.servo_speed[i] = st.speed_dps;
+                local_telem.servo_temp[i]  = st.temp_c;
+            }
+        }
+
+        // === STEP 4: Read latest command from shared buffer (non-blocking) ===
+        RPiCommand_t incoming = {};
+        if (xSemaphoreTake(g_command_mutex, 0) == pdTRUE) {
+            incoming = g_last_cmd;
+            xSemaphoreGive(g_command_mutex);
+        }
         if (incoming.emergency_stop) {
-            // Immediately disable all servos and halt
-            // Implement: send torque disable to all servos
-            while (true) { /* halt */ }
+            // Immediately cease all servo motion — block this task forever
+            // TODO: send torque-disable packet to all servos before halting
+            while (true) { vTaskDelay(portMAX_DELAY); }
         }
         if (incoming.execute) {
-            memcpy(last_cmd_joints, current_joints, sizeof(current_joints));
-            last_cmd_joints[0] = incoming.target_arm[0];  // J0
-            last_cmd_joints[1] = incoming.target_arm[1];  // J1 (sent to both J1a and J1b)
-            last_cmd_joints[2] = incoming.target_arm[2];  // J2
-            last_cmd_joints[3] = incoming.gripper_command * 100.0f;  // J3: 0-100%
+            last_cmd_joints[0] = incoming.target_arm[0];          // J0
+            last_cmd_joints[1] = incoming.target_arm[1];          // J1 (J1a + J1b identical)
+            last_cmd_joints[2] = incoming.target_arm[2];          // J2
+            last_cmd_joints[3] = incoming.gripper_command * 100.0f;  // J3: 0–100%
             interp_set_targets(current_joints, last_cmd_joints, 125000);  // 125ms window
             have_first_cmd = true;
-
-            // Handle contact oracle reset on REACH skill
-            if (incoming.skill_state == 0) {  // REACH
+            if (incoming.skill_state == 0) {  // REACH — reset contact latch
                 contact_oracle_reset();
             }
         }
-        last_cmd = incoming;
+
+        // === STEP 5: Waypoint interpolation → safety clamp → servo sync write ===
+        if (have_first_cmd) {
+            float target[4];
+            interp_get_current(target);
+
+            bool clamped = false;
+            safety_clamp(target, &clamped);
+            local_telem.safety_clamped = clamped ? 1 : 0;
+
+            const uint8_t sync_ids[5] = {
+                SERVO_ID_J0, SERVO_ID_J1A, SERVO_ID_J1B, SERVO_ID_J2, SERVO_ID_J3
+            };
+            float sync_pos[5] = { target[0], target[1], target[1], target[2], target[3] };
+            servo_sync_write(sync_ids, sync_pos, 5);
+            memcpy(current_joints, target, sizeof(current_joints));
+        }
+
+        // === STEP 6: Assemble telemetry → push to shared buffer for comms_task ===
+        local_telem.timestamp_us = micros();
+        ImuData imu = imu_get_latest();
+        local_telem.imu_gyro[0]  = imu.gx;
+        local_telem.imu_gyro[1]  = imu.gy;
+        local_telem.imu_gyro[2]  = imu.gz;
+        local_telem.imu_accel[0] = imu.ax;
+        local_telem.imu_accel[1] = imu.ay;
+        local_telem.imu_accel[2] = imu.az;
+        local_telem.contact_flag = contact_oracle_event() ? 1 : 0;
+        local_telem.contact_rms  = contact_oracle_rms();
+
+        if (xSemaphoreTake(g_telemetry_mutex, 0) == pdTRUE) {
+            g_telemetry = local_telem;
+            xSemaphoreGive(g_telemetry_mutex);
+        }
+
+        // === STEP 7: Sleep until next 20ms deadline ===
+        vTaskDelayUntil(&lastWakeTime, period);
     }
+}
 
-    // === TASK 5: Waypoint interpolation → safety clamp → servo write ===
-    if (have_first_cmd) {
-        float target[4];
-        interp_get_current(target);
+// ── Core 0: USB Serial Comms Task ─────────────────────────────────────────────
+void comms_task(void* pvParameters) {
+    while (true) {
+        // Send latest telemetry snapshot to RPi5
+        ControllerTelemetry_t snap = {};
+        if (xSemaphoreTake(g_telemetry_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+            snap = g_telemetry;
+            xSemaphoreGive(g_telemetry_mutex);
+        }
+        comms_send_telemetry(&snap);
 
-        bool clamped = false;
-        safety_clamp(target, &clamped);
-        telemetry.safety_clamped = clamped ? 1 : 0;
+        // Receive RPi5 command (returns false immediately if none available)
+        RPiCommand_t cmd = {};
+        if (comms_receive_command(&cmd)) {
+            if (xSemaphoreTake(g_command_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                g_last_cmd = cmd;
+                xSemaphoreGive(g_command_mutex);
+            }
+        }
 
-        // Write to servos: J0, J2 individual; J1a and J1b get identical J1 command
-        const uint8_t sync_ids[5] = {
-            SERVO_ID_J0, SERVO_ID_J1A, SERVO_ID_J1B, SERVO_ID_J2, SERVO_ID_J3
-        };
-        float sync_pos[5] = { target[0], target[1], target[1], target[2], target[3] };
-        servo_sync_write(sync_ids, sync_pos, 5);
-        memcpy(current_joints, target, sizeof(current_joints));
+        vTaskDelay(pdMS_TO_TICKS(1));  // yield 1ms — comms is not timing-critical
     }
+}
 
-    // === TASK 6: Assemble and send telemetry ===
-    telemetry.timestamp_us = micros();
-    ImuData imu = imu_get_latest();
-    telemetry.imu_gyro[0] = imu.gx;
-    telemetry.imu_gyro[1] = imu.gy;
-    telemetry.imu_gyro[2] = imu.gz;
-    telemetry.imu_accel[0] = imu.ax;
-    telemetry.imu_accel[1] = imu.ay;
-    telemetry.imu_accel[2] = imu.az;
-    telemetry.contact_flag = contact_oracle_event() ? 1 : 0;
-    telemetry.contact_rms  = contact_oracle_rms();
+// ── Arduino entry points ───────────────────────────────────────────────────────
+void setup() {
+    // Step 1: disable WiFi and BT entirely before anything else.
+    // This prevents RF interrupt sources from causing jitter on Core 0's scheduler.
+    WiFi.mode(WIFI_OFF);
+    btStop();
 
-    comms_send_telemetry(&telemetry);
+    Serial.begin(USB_BAUD);  // UART0 via CH340/CP2102 bridge → RPi5
+
+    // Step 2: create mutexes before spawning tasks
+    g_telemetry_mutex = xSemaphoreCreateMutex();
+    g_command_mutex   = xSemaphoreCreateMutex();
+
+    // Step 3: initialise all peripherals sequentially on Core 0
+    safety_init();
+    servo_bus_init();      // internally: Serial2.begin(SERVO_BAUD, SERIAL_8N1, SERVO_RX_PIN, SERVO_TX_PIN)
+    imu_init();            // internally: SPI.begin(); configure ISM330DHCX registers
+    tof_init();            // internally: Wire.begin(TOF_SDA, TOF_SCL); upload VL53L5CX firmware (~500ms)
+    contact_oracle_init(CONTACT_THRESHOLD);
+    comms_init();
+
+    // Step 4: pin 50Hz control loop to Core 1 (app_cpu)
+    xTaskCreatePinnedToCore(
+        control_task,
+        "ControlTask",
+        CONTROL_TASK_STACK,
+        NULL,
+        CONTROL_TASK_PRIO,   // priority 10 — highest
+        NULL,
+        1                    // Core 1
+    );
+
+    // Step 5: pin serial comms to Core 0 (pro_cpu)
+    xTaskCreatePinnedToCore(
+        comms_task,
+        "CommsTask",
+        COMMS_TASK_STACK,
+        NULL,
+        COMMS_TASK_PRIO,     // priority 5 — lower than control
+        NULL,
+        0                    // Core 0
+    );
+
+    Serial.println("ESP32 ready.");
+
+    // Step 6: delete the Arduino loop() task — all work is in the two tasks above
+    vTaskDelete(NULL);
+}
+
+void loop() {
+    // Intentionally empty. This task is deleted in setup() and never executes.
 }
 ```
 
 ### 2.11 Expected Outputs at End of Phase 2
 
-- [ ] `sizeof(TeensyTelemetry_t)` prints exactly 250 in firmware
-- [ ] `sizeof(RPiCommand_t)` prints exactly 20 in firmware
-- [ ] USB serial streaming at 50Hz visible in serial monitor (250 bytes every 20ms)
-- [ ] Servo sync write commands produce smooth motion (no jitter, no twitching)
-- [ ] IMU WHO_AM_I confirmed 0x6B; gyro RMS spikes clearly visible when tapping the gripper
+- [ ] `sizeof(ControllerTelemetry_t)` prints exactly 250 in firmware (add a `Serial.println(sizeof(ControllerTelemetry_t))` to `setup()` for one-time verification, then remove)
+- [ ] `sizeof(RPiCommand_t)` prints exactly 20 in firmware (same approach)
+- [ ] USB serial streaming at 50Hz visible in serial monitor — 250 bytes every 20ms; measure using a packet capture script on RPi5
+- [ ] Both FreeRTOS tasks confirmed running: add a `Serial.printf("core=%d\n", xPortGetCoreID())` in each task's first cycle to verify Core 0 / Core 1 assignment
+- [ ] Servo sync write commands produce smooth motion — no jitter, no twitching; test by commanding a slow 0→45° sweep on J0
+- [ ] IMU WHO_AM_I confirmed 0x6B; gyro RMS spikes clearly visible on serial monitor when tapping the gripper
 - [ ] ToF distances match a ruler measurement within ±8mm for objects at 50–300mm
 - [ ] Contact oracle triggers reliably when gripper closes against a hard block; does not trigger during free motion
-- [ ] Safety clamp prevents any joint from exceeding hardcoded limits; verify by sending an out-of-range command
+- [ ] Safety clamp prevents any joint from exceeding hardcoded limits; verify by sending an out-of-range command from a test script
+- [ ] No WDT (watchdog timer) resets: monitor serial output for `E (xxxx) task_wdt` messages; if present, investigate which task is blocking
 
 ---
 
@@ -1194,7 +1307,7 @@ with open('calibration/overhead_height.yaml', 'w') as f:
 **Procedure:**
 1. Command the arm to a known pre-grasp hover position directly above the table (arm extended, gripper pointing straight down).
 2. Place the flat calibration board on the table exactly below the wrist.
-3. Record the ToF center zone average (average of zones 27, 28, 35, 36) from the Teensy telemetry stream.
+3. Record the ToF center zone average (average of zones 27, 28, 35, 36) from the ESP32 telemetry stream.
 4. Physically measure the distance from the gripper reference point to the table surface. Use the reference point your friend's pose estimator treats as the end-effector target.
 5. `wrist_to_sensor_offset_mm = tof_reading_mm - physical_gripper_reference_to_table_mm`
 
@@ -1525,7 +1638,7 @@ Prove that the full 3D pose estimation pipeline is accurate before your friend d
 
 ### 5.1 Contact Oracle Ground Truth Test
 
-**Method:** Hold a solid block against the gripper by hand. Confirm that `contact_flag` goes HIGH in the Teensy telemetry. Confirm it does NOT go HIGH when the arm moves freely with no contact.
+**Method:** Hold a solid block against the gripper by hand. Confirm that `contact_flag` goes HIGH in the ESP32 telemetry. Confirm it does NOT go HIGH when the arm moves freely with no contact.
 
 **Quantitative test:** Log `contact_rms` values during free motion vs. contact events. Compute mean and max for each. Set `CONTACT_THRESHOLD` between `(free_max + contact_min) / 2`. Update in `config.h` and reflash.
 
@@ -1552,7 +1665,7 @@ KNOWN_X, KNOWN_Y = 0.20, 0.05
 # Step 1: Run YOLOv8-nano detection (or use a simple color threshold for this test)
 # Step 2: Compute X, Y from overhead camera
 # Step 3: Move arm to pre-grasp hover above the block
-# Step 4: Read ToF center zones from Teensy
+# Step 4: Read ToF center zones from ESP32 telemetry
 # Step 5: Compute Z
 # Step 6: Compare computed 3D pose to known position
 
@@ -1716,14 +1829,14 @@ if __name__ == '__main__':
         print("Target unreachable.")
 ```
 
-### 6.3 Mock Teensy Serial for Testing Friend's Inference Code
+### 6.3 Mock ESP32 Serial for Testing Friend's Inference Code
 
 ```python
-# simulation/mock_teensy.py
+# simulation/mock_esp32.py
 """
-Runs a fake Teensy that streams synthetic telemetry over a virtual serial port.
+Runs a fake ESP32 that streams synthetic ControllerTelemetry_t packets over a virtual serial port.
 Allows friend to test their inference pipeline without hardware.
-Usage: python mock_teensy.py --port /dev/ttyUSB0
+Usage: python mock_esp32.py --port /dev/ttyUSB0
 Creates a pty pair; friend connects to /dev/pts/X printed at startup.
 """
 import struct, time, numpy as np, os, pty, serial
@@ -1755,7 +1868,7 @@ def make_fake_telemetry(t):
     return pkt
 
 master, slave = pty.openpty()
-print(f"Mock Teensy on: {os.ttyname(slave)}")
+print(f"Mock ESP32 on: {os.ttyname(slave)}")
 t = 0.0
 while True:
     t0 = time.monotonic()
@@ -1769,7 +1882,7 @@ while True:
 
 - [ ] `simulation/arm_kinematics.py` — FK/IK verified: FK(IK(target)) matches target within 0.5mm for 20 random targets
 - [ ] `simulation/visualize_arm.py` — 3D visualization working, shows correct arm geometry
-- [ ] `simulation/mock_teensy.py` — streaming synthetic 250-byte telemetry at 50Hz; friend confirms their parser reads it correctly
+- [ ] `simulation/mock_esp32.py` — streaming synthetic 250-byte telemetry at 50Hz; friend confirms their parser reads it correctly
 
 ---
 
@@ -1783,17 +1896,17 @@ End-to-end validation with both your firmware and your friend's inference pipeli
 Run these tests in order:
 
 **Step 1 — Serial handshake:**
-- [ ] Friend's `teensy_serial.py` successfully parses your 250-byte telemetry packets (print servo positions to confirm)
-- [ ] Your Teensy successfully receives and executes friend's 20-byte command packets
+- [ ] Friend's `controller_serial.py` successfully parses your 250-byte telemetry packets (print servo positions to confirm)
+- [ ] Your ESP32 successfully receives and executes friend's 20-byte command packets
 - [ ] Emergency stop command halts all servos immediately (test this first — safety)
 
 **Step 2 — Latency measurement:**
 - [ ] Friend measures their actual inference loop time on RPi5. Must report: min, median, max over 100 steps
-- [ ] You measure actual control loop timing on Teensy. Jitter must be < 0.5ms
+- [ ] You measure actual control loop timing on the ESP32. Jitter must be < 2ms (FreeRTOS with WiFi/BT off; measure with `micros()` delta at top of control_task)
 
 **Step 3 — Waypoint tracking:**
 - [ ] Friend sends a sequence of commanded positions; you confirm arm tracks them smoothly
-- [ ] Send an intentionally bad position (outside joint limits). Confirm Teensy clamps it and sets `safety_clamped=1`
+- [ ] Send an intentionally bad position (outside joint limits). Confirm the ESP32 clamps it and sets `safety_clamped=1`
 
 **Step 4 — Contact oracle integration:**
 - [ ] While arm is executing GRASP, close gripper on block, verify `contact_flag=1` appears in telemetry within 20ms
@@ -1863,9 +1976,9 @@ Add this to `setup()` in main.cpp before any other initialization:
 ```c
 Serial.begin(USB_BAUD);
 delay(1000);
-Serial.printf("sizeof(TeensyTelemetry_t) = %d  (expected 250)\n", sizeof(TeensyTelemetry_t));
+Serial.printf("sizeof(ControllerTelemetry_t) = %d  (expected 250)\n", sizeof(ControllerTelemetry_t));
 Serial.printf("sizeof(RPiCommand_t) = %d  (expected 20)\n", sizeof(RPiCommand_t));
-if (sizeof(TeensyTelemetry_t) != 250 || sizeof(RPiCommand_t) != 20) {
+if (sizeof(ControllerTelemetry_t) != 250 || sizeof(RPiCommand_t) != 20) {
     Serial.println("STRUCT SIZE MISMATCH — check padding, halt.");
     while(1);
 }
@@ -1882,7 +1995,7 @@ Do not proceed with any development until both sizes print correctly.
 | Week 2 | Assembled hardware; all sensors verified; firmware boots and streams |
 | Week 3 | Complete firmware with contact oracle + safety; all 6 calibration files |
 | Week 4 | 30 demo HDF5 files delivered to friend; teleop interface working |
-| Week 5 | Sensor fusion validation results; kinematic simulation + mock Teensy |
+| Week 5 | Sensor fusion validation results; kinematic simulation + mock ESP32 |
 | Week 7 | Integration testing complete with friend's inference pipeline |
 | Week 8 | Evaluation complete; all code on GitHub |
 
