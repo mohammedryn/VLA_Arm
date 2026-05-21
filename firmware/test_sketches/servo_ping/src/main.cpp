@@ -21,6 +21,10 @@ static bool ping_servo(uint8_t id) {
     Serial2.write(pkt, 6);
     Serial2.flush();  // wait for TX to drain before listening
 
+    // Drain any echo bytes that appear on the half-duplex bus
+    delayMicroseconds(300);  // 6 bytes @ 1Mbps = 60µs; 300µs gives margin
+    while (Serial2.available()) Serial2.read();
+
     uint8_t resp[6];
     uint8_t idx = 0;
     uint32_t deadline = micros() + 10000;  // 10ms timeout
