@@ -43,64 +43,66 @@ def verify_checksum(raw: bytes) -> bool:
 def main():
     print(f"Opening {PORT} at {BAUD} baud...")
     ser = serial.Serial(PORT, BAUD, timeout=2.0)
-    time.sleep(0.5)  # let ESP32 settle
-    ser.reset_input_buffer()
+    try:
+        time.sleep(0.5)  # let ESP32 settle
+        ser.reset_input_buffer()
 
-    packets = []
-    bad_checksums = 0
-    t_start = time.monotonic()
+        packets = []
+        bad_checksums = 0
+        t_start = time.monotonic()
 
-    print("Reading 100 packets...")
-    while len(packets) < 100:
-        raw = ser.read(PACKET_SIZE)
-        if len(raw) != PACKET_SIZE:
-            print(f"  Short read: got {len(raw)} bytes (timeout?)")
-            continue
-        if not verify_checksum(raw):
-            bad_checksums += 1
-            continue
-        pkt = np.frombuffer(raw, dtype=TELEMETRY_DTYPE)[0]
-        packets.append(pkt)
+        print("Reading 100 packets...")
+        while len(packets) < 100:
+            raw = ser.read(PACKET_SIZE)
+            if len(raw) != PACKET_SIZE:
+                print(f"  Short read: got {len(raw)} bytes (timeout?)")
+                continue
+            if not verify_checksum(raw):
+                bad_checksums += 1
+                continue
+            pkt = np.frombuffer(raw, dtype=TELEMETRY_DTYPE)[0]
+            packets.append(pkt)
 
-    elapsed = time.monotonic() - t_start
-    rate = len(packets) / elapsed
+        elapsed = time.monotonic() - t_start
+        rate = len(packets) / elapsed
 
-    print("\n=== Telemetry Verification ===")
-    print(f"Packets:        {len(packets)}")
-    print(f"Bad checksums:  {bad_checksums}")
-    print(f"Elapsed:        {elapsed:.2f}s")
-    print(f"Rate:           {rate:.1f} Hz  (target 50 Hz)  "
-          f"{'PASS' if 45 < rate < 55 else 'FAIL'}")
+        print("\n=== Telemetry Verification ===")
+        print(f"Packets:        {len(packets)}")
+        print(f"Bad checksums:  {bad_checksums}")
+        print(f"Elapsed:        {elapsed:.2f}s")
+        print(f"Rate:           {rate:.1f} Hz  (target 50 Hz)  "
+              f"{'PASS' if 45 < rate < 55 else 'FAIL'}")
 
-    p = packets[-1]
-    print(f"\nLatest packet fields:")
-    print(f"  timestamp_us:  {p['timestamp_us']}")
-    print(f"  servo_pos[5]:  {np.round(p['servo_pos'], 2)}")
-    print(f"  servo_temp[5]: {np.round(p['servo_temp'], 1)}")
-    print(f"  imu_gyro[3]:   {np.round(p['imu_gyro'], 3)}")
-    print(f"  imu_accel[3]:  {np.round(p['imu_accel'], 3)}")
-    print(f"  contact_rms:   {p['contact_rms']:.4f}")
-    print(f"  tof_valid:     {p['tof_valid']}")
+        p = packets[-1]
+        print(f"\nLatest packet fields:")
+        print(f"  timestamp_us:  {p['timestamp_us']}")
+        print(f"  servo_pos[5]:  {np.round(p['servo_pos'], 2)}")
+        print(f"  servo_temp[5]: {np.round(p['servo_temp'], 1)}")
+        print(f"  imu_gyro[3]:   {np.round(p['imu_gyro'], 3)}")
+        print(f"  imu_accel[3]:  {np.round(p['imu_accel'], 3)}")
+        print(f"  contact_rms:   {p['contact_rms']:.4f}")
+        print(f"  tof_valid:     {p['tof_valid']}")
 
-    # Sanity checks
-    checks = [
-        ("Rate 45–55 Hz",          45 < rate < 55),
-        ("No bad checksums",        bad_checksums == 0),
-        ("IMU accel non-zero",      np.any(np.abs(p['imu_accel']) > 0.1)),
-        ("Servo temps reasonable",  np.all(p['servo_temp'] > 10) and np.all(p['servo_temp'] < 80)),
-        ("timestamp_us non-zero",   p['timestamp_us'] > 0),
-    ]
+        # Sanity checks
+        checks = [
+            ("Rate 45–55 Hz",          45 < rate < 55),
+            ("No bad checksums",        bad_checksums == 0),
+            ("IMU accel non-zero",      np.any(np.abs(p['imu_accel']) > 0.1)),
+            ("Servo temps reasonable",  np.all(p['servo_temp'] > 10) and np.all(p['servo_temp'] < 80)),
+            ("timestamp_us non-zero",   p['timestamp_us'] > 0),
+        ]
 
-    print("\nChecks:")
-    all_pass = True
-    for label, result in checks:
-        status = "PASS" if result else "FAIL"
-        print(f"  {status}  {label}")
-        if not result:
-            all_pass = False
+        print("\nChecks:")
+        all_pass = True
+        for label, result in checks:
+            status = "PASS" if result else "FAIL"
+            print(f"  {status}  {label}")
+            if not result:
+                all_pass = False
 
-    print(f"\nOverall: {'ALL PASS' if all_pass else 'SOME FAILURES — see above'}")
-    ser.close()
+        print(f"\nOverall: {'ALL PASS' if all_pass else 'SOME FAILURES — see above'}")
+    finally:
+        ser.close()
 
 if __name__ == '__main__':
     main()
