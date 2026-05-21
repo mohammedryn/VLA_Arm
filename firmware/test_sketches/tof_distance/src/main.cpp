@@ -7,7 +7,7 @@
 #define TOF_LPN  27   // power enable, HIGH = powered
 #define TOF_INT  26   // data-ready interrupt, active LOW
 
-VL53L5CX sensor(&Wire, TOF_SDA, TOF_SCL);
+VL53L5CX sensor(&Wire, TOF_LPN, TOF_INT);
 bool init_ok = false;
 
 void setup() {
@@ -27,7 +27,7 @@ void setup() {
     Wire.setClock(400000);
 
     Serial.println("Uploading VL53L5CX firmware (~500ms)...");
-    uint8_t status = sensor.vl53l5cx_init();
+    uint8_t status = sensor.init_sensor(0x52);
     if (status != 0) {
         Serial.printf("Init FAILED: status=%d — check SDA/SCL and LPn wiring\n", status);
         return;
