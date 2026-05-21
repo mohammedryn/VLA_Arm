@@ -48,10 +48,7 @@ void loop() {
 
     uint8_t ready = 0;
     sensor.vl53l5cx_check_data_ready(&ready);
-    if (!ready) {
-        delay(10);
-        return;
-    }
+    if (!ready) { delay(10); return; }
 
     VL53L5CX_ResultsData results;
     sensor.vl53l5cx_get_ranging_data(&results);
