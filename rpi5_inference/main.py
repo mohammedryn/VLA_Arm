@@ -30,7 +30,8 @@ LOOP_HZ       = 8
 LOOP_PERIOD_S = 1.0 / LOOP_HZ          # 125 ms
 OVERRUN_MS    = LOOP_PERIOD_S * 1e3     # 125.0 — threshold for overrun warning
 
-DEFAULT_PORT        = "/dev/ttyACM0"
+DEFAULT_PORT        = "/dev/ttyUSB0"   # ESP32 sensor telemetry
+DEFAULT_SERVO_PORT  = "/dev/ttyACM0"  # SmartElex servo bus
 DEFAULT_INSTRUCTION = "pick up the red cube"
 DEFAULT_CHECKPOINT  = "checkpoints/yolov8n_vla/weights/best.pt"
 DEFAULT_VLA_CHECKPOINT = "checkpoints/vla_policy_traced.pt"
@@ -47,7 +48,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Vision-Language-Action robotic arm inference loop",
     )
     p.add_argument("--port",        default=DEFAULT_PORT,
-                   help=f"Teensy serial port (default: {DEFAULT_PORT})")
+                   help=f"ESP32 serial port for sensor telemetry (default: {DEFAULT_PORT})")
+    p.add_argument("--servo-port",  default=DEFAULT_SERVO_PORT,
+                   help=f"SmartElex servo port (default: {DEFAULT_SERVO_PORT})")
     p.add_argument("--instruction", default=DEFAULT_INSTRUCTION,
                    help="Natural-language task instruction")
     p.add_argument("--checkpoint",  default=DEFAULT_CHECKPOINT,
@@ -207,6 +210,7 @@ def run_loop(args) -> int:
     from rpi5_inference.perception.yolo_detector  import YOLODetector
     from rpi5_inference.perception.pose_estimation import PoseEstimator
     from rpi5_inference.comms.teensy_serial       import TeensySerial
+    from rpi5_inference.comms.servo_driver        import ServoDriver
     from rpi5_inference.perception.camera_manager import CameraManager
     from rpi5_inference.vla.vla_policy            import VLARuntime
     from rpi5_inference.vla.action_generator      import ActionGenerator
@@ -219,9 +223,10 @@ def run_loop(args) -> int:
     pe  = PoseEstimator()
     sf  = SafetyFilter()
     sm  = SkillStateMachine()
-    ts  = TeensySerial(args.port)
+    ts     = TeensySerial(args.port)
+    servo  = ServoDriver(args.servo_port)
     camera = None
-    camera     = CameraManager()
+    camera = CameraManager()
     vla        = VLARuntime(DEFAULT_VLA_CHECKPOINT, enc)
     action_gen = ActionGenerator()
 
@@ -313,11 +318,17 @@ def run_loop(args) -> int:
                 warnings.simplefilter("ignore")
                 safe_joints = sf.filter(joints_4)
 
-            # ── 4. Command ────────────────────────────────────────────
-            ts.send_command(
-                joints_deg=safe_joints[:4].tolist(),
-                gripper_pct=_gripper_pct(sm.state),
-                skill_state=int(sm.state),
+            # ── 4. Command — send directly to servos via SmartElex USB ──
+            gripper_deg = 0.0 if _gripper_pct(sm.state) == 0 else 95.0
+            servo.sync_write(
+                ids=[1, 2, 3, 4, 5],
+                positions_deg=[
+                    float(safe_joints[0]),   # J0 base
+                    float(safe_joints[1]),   # J1a shoulder
+                    float(safe_joints[1]),   # J1b shoulder (coupled)
+                    float(safe_joints[2]),   # J2 elbow
+                    gripper_deg,             # J3 gripper
+                ],
             )
 
             # ── 5. Timing ─────────────────────────────────────────────
@@ -334,6 +345,7 @@ def run_loop(args) -> int:
         log.info("Interrupted after %d ticks (%d overruns). Shutting down.", tick, overruns)
     finally:
         ts.close()
+        servo.close()
         if camera is not None:
             camera.close()
 
