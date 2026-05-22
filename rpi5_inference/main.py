@@ -220,6 +220,7 @@ def run_loop(args) -> int:
     sf  = SafetyFilter()
     sm  = SkillStateMachine()
     ts  = TeensySerial(args.port)
+    camera = None
     camera     = CameraManager()
     vla        = VLARuntime(DEFAULT_VLA_CHECKPOINT, enc)
     action_gen = ActionGenerator()
@@ -333,7 +334,8 @@ def run_loop(args) -> int:
         log.info("Interrupted after %d ticks (%d overruns). Shutting down.", tick, overruns)
     finally:
         ts.close()
-        camera.close()
+        if camera is not None:
+            camera.close()
 
     return 0
 
