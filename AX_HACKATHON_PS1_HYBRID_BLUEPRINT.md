@@ -47,6 +47,8 @@ Unlike a generic hackathon submission that only demonstrates isolated pick-and-p
 
 The project also preserves a major differentiator from the underlying real-world robotics effort: a **sim-to-real transfer path** to an affordable four-DOF STS3215 serial-bus servo arm with a Raspberry Pi 5 inference stack and Teensy 4.1 real-time controller. This real-hardware extension is not treated as a hackathon dependency; instead, it is positioned as a high-value continuation path that strengthens the credibility, practical relevance, and future extensibility of the submission.
 
+A key architectural differentiator is a **genuine agentic orchestration layer**: an open-weight vision-language model acts as a Planner Agent that calls a structured tool suite — perception, grounding, skill execution, and verification — rather than outputting joint angles directly. This tool-calling pattern enables episode memory, structured decision logging, and goal-driven replanning when skill execution fails, making the system measurably more capable than a single-pass pipeline.
+
 If executed successfully, this system would demonstrate that a compact, open-source, simulation-first VLA pipeline can achieve meaningful natural-language manipulation performance without requiring expensive industrial hardware, proprietary APIs, or massive data infrastructure. The intended outcome is a hackathon submission that is both **judge-aligned** and **engineering-serious**: strong enough to compete in the short term and structured enough to guide real implementation afterward.
 
 ---
@@ -243,6 +245,10 @@ The project should be ambitious in system integration, not reckless in problem s
 
 Even if final judging happens on simulation artifacts, the design should preserve the interfaces needed for future real-arm deployment. This adds depth, not distraction.
 
+### 5.8 Agentic Orchestration
+
+An open-weight vision-language model acts as a Planner Agent that orchestrates the robotics stack through a structured tool suite rather than directly emitting joint commands. The agent calls `parse_command`, `build_scene_graph`, `resolve_target`, `execute_skill`, and `verify_goal` as discrete tools; it does not replace any of those modules. This separation means the agent adds decision-making, memory, and replanning capability on top of a solid skill-based foundation, without making the underlying engineering fragile.
+
 ---
 
 ## 6. Related Work and Design Positioning
@@ -283,6 +289,12 @@ This is not intended to be the largest or most general VLA system. It is intende
 - more realistic than a toy scripted demo,
 - and more buildable than an overambitious open-world manipulation claim.
 
+### 6.6 Agentic Robot Control
+
+A growing lineage of work treats language models as planners that call robot tools rather than generate raw actions. **SayCan** (Ahn et al., 2022) grounds LLM proposals in feasibility scores derived from a learned value function, showing that natural-language plans can be constrained by physical affordances. **Code as Policies** (Liang et al., 2023) goes further, having the LLM write executable Python that calls robot primitives — the code itself is the plan. **ReAct** (Yao et al., 2023) introduces interleaved reasoning and acting in a tool-calling loop, where the model decides which tool to invoke next based on prior observations.
+
+This project draws on all three insights. Like SayCan, it grounds high-level intent in a physically feasible skill set. Like Code as Policies, the Planner Agent invokes discrete tool calls rather than emitting joint commands. Like ReAct, the episode loop interleaves goal-state observation (via `build_scene_graph` and `verify_goal`) with action dispatch (via `execute_skill`), enabling the agent to adjust its plan if a skill step fails. The key difference from all three predecessors is that this system uses an **open-weight** vision-language model as the orchestrator, with no proprietary inference API dependency.
+
 ---
 
 ## 7. System Overview
@@ -291,49 +303,68 @@ The system receives an RGB observation and a natural-language instruction, const
 
 ### 7.1 End-to-End Data Flow
 
+The system is organized into three layers. The **Agent Layer** decides; the **Robotics Stack Layer** executes; the **Simulation Layer** provides ground truth.
+
 ```mermaid
 flowchart TB
-    CMD["Natural-language command"]
-    RGB["RGB scene frame"]
-    DET["Object detection + attribute extraction"]
-    SG["Structured scene graph / object table"]
-    PARSE["Language grounding and goal parser"]
-    GOAL["Executable task goal"]
-    SKILL["Hierarchical skill policy"]
-    IK["IK + motion synthesis"]
-    CTRL["PyBullet joint control"]
-    STATE["Updated scene state"]
-    VERIFY["Goal-condition evaluator"]
-    METRICS["KPI logger"]
+    subgraph AGENT ["Layer 1 — Agent Orchestration"]
+        CMD["Natural-language command"]
+        PLANNER["Planner Agent\n(open-weight VLM)"]
+        DECLOG["Structured decision log"]
+        MEMORY["Episode memory"]
+    end
 
-    CMD --> PARSE
-    RGB --> DET --> SG
-    SG --> PARSE
-    PARSE --> GOAL
-    GOAL --> SKILL --> IK --> CTRL --> STATE --> VERIFY --> METRICS
-    STATE --> SG
+    subgraph STACK ["Layer 2 — Robotics Stack (tools)"]
+        PARSE["parse_command()"]
+        SG["build_scene_graph()\n+ YOLOv8 / sim metadata"]
+        GROUND["resolve_target()\n+ compute_goal_pose()"]
+        SKILL["execute_skill()\nREACH → GRASP → LIFT → PLACE"]
+        IK["IK + safety clamp"]
+        VERIFY["verify_goal()"]
+    end
+
+    subgraph SIM ["Layer 3 — Simulation"]
+        PYBULLET["PyBullet env"]
+        METRICS["KPI logger"]
+    end
+
+    CMD --> PLANNER
+    PLANNER -->|tool call| PARSE
+    PLANNER -->|tool call| SG
+    PLANNER -->|tool call| GROUND
+    PLANNER -->|tool call| SKILL
+    PLANNER -->|tool call| VERIFY
+    PARSE --> MEMORY
+    SG --> GROUND
+    SKILL --> IK --> PYBULLET
+    VERIFY --> METRICS
+    VERIFY -->|replan trigger| PLANNER
+    PLANNER --> DECLOG
+    MEMORY --> PLANNER
 ```
 
 ### 7.2 Main Runtime Layers
 
-The system is organized into six functional layers:
+The system is organized into seven functional layers:
 
-1. **Perception layer**
+1. **Agent orchestration layer**
+   - Planner Agent (open-weight VLM) decides which tool to call next, maintains episode memory, and triggers replanning on failure. All tool calls and outcomes are logged to a structured decision log.
+2. **Perception layer**
    - Detect objects and recover scene state from RGB frames.
-2. **Grounding layer**
+3. **Grounding layer**
    - Map language instructions to target objects, relations, and destination constraints.
-3. **Planning layer**
+4. **Planning layer**
    - Convert grounded goals into skill-level execution structure.
-4. **Control layer**
+5. **Control layer**
    - Use IK and safe motion generation to produce executable actions in simulation.
-5. **Verification layer**
-   - Evaluate whether the final state matches the instruction.
-6. **Benchmark layer**
+6. **Verification layer**
+   - Evaluate whether the final state matches the instruction; signal the agent to retry or replan.
+7. **Benchmark layer**
    - Log metrics, categorize failures, and support reproducible evaluation.
 
 ### 7.3 Primary Differentiator
 
-The most important architectural choice is that the pipeline is **goal-grounded and verifiable**, not merely language-conditioned. The system does not only attempt an action; it attempts to reach a measurable scene condition.
+The most important architectural choice is that the pipeline combines **agentic orchestration with goal-grounded verification**. An open-weight Planner Agent calls the robotics stack as a tool suite, maintaining episode memory and replanning on failure. The system does not only attempt an action; it attempts to reach a measurable scene condition and can reason about why it fell short.
 
 ### 7.4 Proposed Software Module Layout
 
@@ -341,6 +372,12 @@ To keep the system implementation clean and extensible, the repository should se
 
 ```text
 ax_vla_ps1/
+├── agents/
+│   ├── planner_agent.py       # Planner Agent: VLM tool-call orchestrator
+│   ├── verifier_agent.py      # Verifier Agent: goal-check + replan signal
+│   ├── tools.py               # Tool registry (parse_command, build_scene_graph, etc.)
+│   ├── episode_memory.py      # Episode memory init + update helpers
+│   └── decision_log.py        # Structured decision-log schema + serializer
 ├── sim/
 │   ├── env.py                 # PyBullet environment wrapper
 │   ├── urdf/                  # Arm and object models
@@ -382,6 +419,72 @@ ax_vla_ps1/
 ```
 
 This module structure preserves clear interfaces and makes it easier to substitute learned components later without rewriting the full stack.
+
+### 7.5 Agent Architecture
+
+#### 7.5.1 Planner Agent
+
+The Planner Agent is an open-weight vision-language model that receives the natural-language command and the current scene state, then issues a sequence of tool calls. It does **not** directly emit joint angles or IK targets. Its responsibilities are:
+
+- parse command intent once at the start of the episode,
+- select which skill to execute at each step,
+- read verifier output and decide whether to retry, replan, or terminate,
+- maintain episode memory across retries.
+
+The agent calls `parse_command()` as its first tool — structured parsing logic is preserved inside that tool and is not replaced.
+
+#### 7.5.2 Verifier Agent
+
+The Verifier Agent wraps `verify_goal()` and adds a structured judgment:
+
+- `"done"` — goal condition satisfied, episode ends successfully,
+- `"retry"` — goal condition not yet met but skill execution looks recoverable (e.g. object slightly misplaced),
+- `"replan"` — goal condition not met and a structural assumption has changed (e.g. wrong object grasped, object fell).
+
+The Planner Agent consumes this status to decide its next tool call.
+
+#### 7.5.3 Tool Suite
+
+| Tool | Signature | Purpose |
+|---|---|---|
+| `parse_command` | `(command: str) → goal_dict` | Structured goal extraction; rule-based or learned |
+| `build_scene_graph` | `(rgb: np.ndarray) → scene_dict` | Object detection + attribute extraction + scene state |
+| `resolve_target` | `(descriptor, scene, memory) → obj_dict` | Memory-aware target disambiguation |
+| `compute_goal_pose` | `(goal, scene) → pose` | Convert relational/tray goal to Cartesian target |
+| `execute_skill` | `(skill, target_id, goal_pose) → result_dict` | Run REACH/GRASP/LIFT/PLACE and return status + confidence |
+| `verify_goal` | `(goal, scene) → status_dict` | Check final-state against goal condition |
+
+#### 7.5.4 Decision Log Schema
+
+Every tool call and its result is appended to the episode decision log. The log is **structured**, not raw chain-of-thought text:
+
+```python
+decision_log_entry = {
+    "step":        int,           # step index within episode
+    "tool":        str,           # tool name called
+    "inputs":      dict,          # tool input arguments
+    "result":      dict,          # tool return value
+    "agent_note":  str | None,    # optional short rationale string (≤ 120 chars)
+}
+```
+
+The log is serialized to JSON at episode end and used for debugging, failure attribution, and ablation analysis.
+
+#### 7.5.5 Episode Memory Schema
+
+```python
+episode_memory = {
+    "parsed_intent":       dict | None,  # result of parse_command, set once
+    "confirmed_target_id": str  | None,  # locked after first successful GRASP
+    "failed_grasps":       list,         # [(target_id, goal_pose, confidence), ...]
+    "retry_count":         int,
+    "max_retries":         int,          # default 3
+    "replan_triggered":    bool,
+    "episode_done":        bool,
+}
+```
+
+`parsed_intent` is set once per episode. `confirmed_target_id` is set after the first successful grasp confirmation and reused during replanning to avoid re-selecting a different object.
 
 ---
 
@@ -457,25 +560,32 @@ Each simulation episode follows this sequence:
 
 ### 8.6 Scene State Representation
 
-Internally, each scene is represented as a structured object table:
+Internally, the full scene is represented as a structured dict that contains both the object table and the named goal-zone registry. The verifier receives this complete structure so that tray-placement checks have access to `goal_zones` without a separate lookup:
 
 ```python
-scene_objects = [
-    {
-        "id": "obj_1",
-        "class": "cube",
-        "color": "red",
-        "size": "small",
-        "position_xyz": [0.14, -0.08, 0.03],
-        "bbox_xyxy": [122, 171, 168, 218],
-        "extent_xyz": [0.03, 0.03, 0.03],
-        "is_targetable": True
-    },
-    ...
-]
+final_scene = {
+    "objects": [
+        {
+            "id": "obj_1",
+            "class": "cube",
+            "color": "red",
+            "size": "small",
+            "position_xyz": [0.14, -0.08, 0.03],
+            "bbox_xyxy": [122, 171, 168, 218],
+            "extent_xyz": [0.03, 0.03, 0.03],
+            "is_targetable": True
+        },
+        # ... additional objects
+    ],
+    "goal_zones": {
+        "left_tray":   {"center_xyz": [-0.15, 0.00, 0.01], "radius": 0.05},
+        "center_tray": {"center_xyz": [ 0.00, 0.00, 0.01], "radius": 0.05},
+        "right_tray":  {"center_xyz": [ 0.15, 0.00, 0.01], "radius": 0.05},
+    }
+}
 ```
 
-This representation is used by both the language grounding module and the goal-condition evaluator.
+`final_scene["objects"]` is used by the language grounding module and the relational verifier. `final_scene["goal_zones"]` is used exclusively by `inside_destination_zone` so that tray identities resolved from the goal schema can be matched to physical workspace regions. Goal-zone positions are seeded at episode-reset time and remain stable within an episode.
 
 ### 8.7 Why PyBullet Is Enough for the Hackathon
 
@@ -627,8 +737,6 @@ def relative_relation(
 
     if dz > stack_z_thresh and planar_dist < stack_xy_thresh:
         return "on_top_of"
-    if planar_dist < near_thresh:
-        return "next_to"
 
     if dx > directional_thresh:
         return "right_of"
@@ -638,6 +746,9 @@ def relative_relation(
         return "behind"
     if dy < -directional_thresh:
         return "in_front_of"
+
+    if planar_dist < near_thresh:
+        return "next_to"
     return "near"
 ```
 
@@ -795,12 +906,16 @@ These skills are not only intuitive for humans; they also provide cleaner loggin
 
 ### 12.3 Planning Representation
 
-The grounding layer outputs a symbolic goal. The planning layer turns that goal into:
+The grounding layer outputs a symbolic goal. In the agentic architecture, the Planner Agent drives this process by calling tools in sequence rather than passing data through a linear pipeline:
 
-- a target object pose,
-- a destination pose or relation constraint,
-- a skill sequence,
-- and a controller-ready motion objective.
+1. `parse_command(command)` → symbolic goal dict (called once per episode)
+2. `build_scene_graph(rgb)` → scene dict with object positions and attributes
+3. `resolve_target(goal["target"], scene, memory)` → confirmed target object
+4. `compute_goal_pose(goal, scene)` → Cartesian destination pose
+5. `execute_skill(skill, target_id, goal_pose)` → skill result with confidence
+6. `verify_goal(goal, scene)` → `{status: "done" | "retry" | "replan"}`
+
+The agent selects skill order (REACH → GRASP → LIFT → PLACE) and interprets each tool result before deciding the next call. The structured `parse_command` logic remains encapsulated inside its tool — the agent calls it but does not replace it.
 
 ### 12.4 Policy Variants
 
@@ -817,12 +932,13 @@ The system supports multiple action-generation strategies:
 
 For the hackathon, the best staged strategy is:
 
-1. establish the simulator and structured planner,
-2. implement language grounding and goal verification,
-3. run a rule-guided skill baseline,
-4. then layer in a learned VLA component as the action or skill-prediction model.
+1. Establish the simulator and structured planner.
+2. Implement language grounding, tool suite, and goal verification.
+3. Run a rule-guided skill baseline to validate the full benchmark loop.
+4. Wire the Planner Agent around the tool suite using episode memory and the agentic control loop from Section 13.6.
+5. Layer in a learned VLA component as the skill-prediction or action-refinement model.
 
-This path maximizes the probability of delivering a robust end-to-end system within time constraints.
+The agentic layer (step 4) should be added before the learned policy (step 5) because it provides episode memory and replanning capability that makes the learned policy easier to evaluate and recover from failure.
 
 ### 12.6 Why This Still Counts as a VLA System
 
@@ -897,7 +1013,51 @@ The safety layer enforces:
 
 ### 13.4 Goal-Condition Verification
 
-The most important post-execution safety and correctness step is the final goal checker:
+The most important post-execution safety and correctness step is the final goal checker. It relies on `resolve_target`, which performs memory-aware disambiguation: if multiple scene objects match the goal descriptor, it first consults the episode memory for a previously confirmed instance ID before falling back to attribute-only matching.
+
+```python
+def resolve_target(descriptor, scene, memory=None):
+    """Return the scene object that best matches descriptor.
+
+    Priority order:
+      1. If memory contains a confirmed instance ID for this descriptor,
+         return that object directly (handles replanning continuity).
+      2. Otherwise filter scene["objects"] by class, color, and size.
+      3. If the descriptor includes an exclusion, remove excluded instances.
+      4. If exactly one candidate remains, return it.
+      5. If multiple remain, return the one closest to the robot base
+         (conservative default; planner can override via explicit ID).
+      6. Return None if no candidate survives filtering.
+    """
+    if memory is not None:
+        confirmed_id = memory.get("confirmed_target_id")
+        if confirmed_id is not None:
+            for obj in scene["objects"]:
+                if obj["id"] == confirmed_id:
+                    return obj
+
+    candidates = scene["objects"]
+
+    for attr in ("class", "color", "size"):
+        if descriptor.get(attr) is not None:
+            candidates = [o for o in candidates if o.get(attr) == descriptor[attr]]
+
+    exclusion = descriptor.get("exclusion")
+    if exclusion is not None:
+        candidates = [
+            o for o in candidates
+            if not all(o.get(k) == v for k, v in exclusion.items())
+        ]
+
+    if len(candidates) == 0:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Tiebreak: closest object to robot base (origin) in XY plane
+    candidates.sort(key=lambda o: o["position_xyz"][0]**2 + o["position_xyz"][1]**2)
+    return candidates[0]
+```
 
 ```python
 def goal_condition_satisfied(goal, final_scene):
@@ -932,7 +1092,7 @@ def goal_condition_satisfied(goal, final_scene):
     if relation == "next_to":
         return planar_dist < 0.08
     if relation == "on_top_of":
-        return is_stably_stacked(target, ref, xy_thresh=0.03, z_thresh=0.025)
+        return is_stably_stacked(target, ref, xy_thresh=0.03)
 
     return False
 ```
@@ -945,6 +1105,9 @@ Two helper definitions are assumed by the verifier:
 def resolve_destination(destination, final_scene):
     return final_scene["goal_zones"].get(destination["name"])
 
+# resolve_target is defined above; goal_condition_satisfied calls it with the
+# full final_scene dict so the memory-aware path is available during replanning.
+
 def inside_destination_zone(target, destination, final_scene, radius=0.05):
     zone = resolve_destination(destination, final_scene)
     if zone is None:
@@ -953,16 +1116,36 @@ def inside_destination_zone(target, destination, final_scene, radius=0.05):
     dy = target["position_xyz"][1] - zone["center_xyz"][1]
     return np.sqrt(dx**2 + dy**2) <= radius
 
-def is_stably_stacked(target, ref, xy_thresh=0.03, z_thresh=0.025):
+def is_stably_stacked(target, ref, xy_thresh=0.03):
     dx = target["position_xyz"][0] - ref["position_xyz"][0]
     dy = target["position_xyz"][1] - ref["position_xyz"][1]
     dz = target["position_xyz"][2] - ref["position_xyz"][2]
-    return np.sqrt(dx**2 + dy**2) <= xy_thresh and dz >= z_thresh
+    # Derive minimum valid stacking height from object extents so that flat
+    # reference objects (low extent_xyz[2]) are not falsely accepted.
+    ref_half_h    = ref.get("extent_xyz",    [0.03, 0.03, 0.03])[2] / 2.0
+    target_half_h = target.get("extent_xyz", [0.03, 0.03, 0.03])[2] / 2.0
+    min_stack_z   = ref_half_h + target_half_h
+    return np.sqrt(dx**2 + dy**2) <= xy_thresh and dz >= min_stack_z
 ```
 
 For exclusion-based commands such as "pick the small red block, not the large red block," final goal verification should be paired with an episode log that records the chosen target instance ID. The verifier then confirms that the manipulated instance matched `goal["target"]` and did not match `goal["exclusion"]`.
 
-### 13.5 Sim-to-Real Safety Extension
+### 13.5 Replanning and Recovery
+
+The agentic loop supports three recovery conditions:
+
+**Condition 1 — Grasp failure (confidence < 0.6)**  
+The GRASP skill returns a confidence score below threshold. The agent records the failed attempt in `memory["failed_grasps"]`, increments `retry_count`, and re-enters the outer loop. Scene grounding is refreshed so the agent gets an updated object position before the next approach.
+
+**Condition 2 — Retry (verifier status `"retry"`)**  
+All four skills completed but the final goal condition is not satisfied — for example, the object landed slightly outside the tray radius. The agent retries the full skill sequence without replanning the goal. This handles small placement errors.
+
+**Condition 3 — Replan (verifier status `"replan"`)**  
+A structural assumption has changed: the wrong object was moved, an object was knocked over, or the scene no longer matches the parsed intent. The agent sets `memory["replan_triggered"] = True`. On the next iteration, it re-runs `build_scene_graph` and `resolve_target` with fresh scene data. If `confirmed_target_id` is already set in memory, it is cleared so a new target can be selected.
+
+In all three conditions, the agent's recovery decision and the verifier's status are appended to the structured decision log so failures can be attributed during post-episode analysis.
+
+### 13.6 Sim-to-Real Safety Extension
 
 In hardware deployment, this same logical structure can be extended with:
 
@@ -974,23 +1157,51 @@ In hardware deployment, this same logical structure can be extended with:
 
 This keeps the architecture consistent across sim and real execution.
 
-### 13.6 Runtime Control Loop in Simulation
+### 13.7 Runtime Control Loop in Simulation
 
-The recommended simulation loop is:
+The agentic episode loop separates command intent parsing (once per episode) from scene grounding (refreshed each iteration). This ensures the agent does not re-interpret the command differently across retries while still adapting to scene changes caused by failed execution:
 
 ```python
-while not done:
-    rgb = env.render_camera()
-    scene = perception.update(rgb)
-    goal = grounding.resolve(command, scene)
-    skill = skill_machine.step(goal, scene, robot_state)
-    target_pose = planner.compute(skill, goal, scene)
-    safe_joint_cmd = safety.clamp(ik.solve(target_pose))
-    env.step(safe_joint_cmd)
-    done = verifier.check(goal, env.current_scene()) or env.timed_out()
+def run_episode(command: str, env) -> dict:
+    memory = episode_memory_init()
+
+    # Command intent parsed ONCE per episode
+    memory["parsed_intent"] = tools.parse_command(command)
+    goal = memory["parsed_intent"]
+
+    while not memory["episode_done"] and memory["retry_count"] < memory["max_retries"]:
+        # Scene grounding refreshed each iteration to handle occlusion / replan changes
+        rgb       = env.render_camera()
+        scene     = tools.build_scene_graph(rgb)
+        target_id = tools.resolve_target(goal["target"], scene, memory)
+        goal_pose = tools.compute_goal_pose(goal, scene)
+
+        # Planner Agent executes skill sequence via tool calls
+        for skill in ["REACH", "GRASP", "LIFT", "PLACE"]:
+            result = tools.execute_skill(skill, target_id=target_id, goal_pose=goal_pose)
+            log_tool_call(memory, "execute_skill", {"skill": skill}, result)
+
+            if skill == "GRASP" and result.get("confidence", 1.0) < 0.6:
+                memory["failed_grasps"].append((target_id, goal_pose, result["confidence"]))
+                memory["retry_count"] += 1
+                break  # re-enter outer loop; scene will be re-grounded
+        else:
+            # All four skills completed — ask verifier for final judgment
+            verifier_result = tools.verify_goal(goal, env.current_scene())
+            log_tool_call(memory, "verify_goal", {}, verifier_result)
+
+            if verifier_result["status"] == "done":
+                memory["episode_done"] = True
+            elif verifier_result["status"] == "retry":
+                memory["retry_count"] += 1
+            elif verifier_result["status"] == "replan":
+                memory["replan_triggered"] = True
+                memory["retry_count"] += 1
+
+    return memory
 ```
 
-This loop is intentionally simple. Complexity should be added to the learned components, not to the control orchestration.
+Target grounding and scene-dependent references (e.g. updated object positions after a partial execution) may be refreshed at the start of each retry iteration. The Planner Agent selects skills via tool calls logged to the structured decision log — it does not emit raw joint angles.
 
 ---
 
@@ -1027,10 +1238,11 @@ Each training episode should contain:
 
 | Component | Primary Choice | Fallback |
 |---|---|---|
+| Orchestration agent | Open-weight VLM (see Section 14.10 for candidate selection) | Rule-based skill sequencer with no agent layer |
 | Object detection | YOLOv8-nano / small | Ground-truth sim metadata during early prototyping |
 | Language encoder | T5-small or lightweight transformer encoder | Rule-based parser |
 | VLA backbone | SmolVLA or Octo-small if feasible | Skill-rule baseline |
-| Goal grounding support | CLIP-style semantic matching for optional extension | explicit ontology mapping |
+| Goal grounding support | CLIP-style semantic matching for optional extension | Explicit ontology mapping |
 
 ### 14.4 Why Not Force a Giant Model
 
@@ -1095,6 +1307,24 @@ The best checkpoint should not be selected only on training loss. It should be s
 
 This keeps model selection aligned with the actual benchmark objective.
 
+### 14.10 Orchestration Agent Model Selection
+
+The open-weight VLM used as the Planner Agent has not been locked to a single choice. Final selection depends on benchmarking along four criteria:
+
+| Criterion | Consideration |
+|---|---|
+| Tool-calling fidelity | Can the model reliably emit structured tool calls rather than free-form text? |
+| Visual grounding quality | Does the model correctly interpret scene descriptions and RGB crops? |
+| Inference latency | Is real-time or near-real-time episode execution feasible on target hardware? |
+| Open-weight accessibility | Is the model fully open-weight, runnable locally, with no proprietary API dependency? |
+
+**Primary candidates:**
+
+- **Qwen2.5-VL-7B** — strong multimodal grounding, proven tool-calling capability in recent benchmarks, efficient at 7B scale.
+- **Llama 3.2-Vision-11B** — strong instruction following, well-supported inference stack, larger parameter count for more complex reasoning.
+
+The final model will be selected after running both candidates against a held-out set of 20 tool-call sequences with ground-truth tool outputs. The selection criterion is highest tool-call accuracy combined with lowest mean episode latency. No proprietary inference APIs (e.g. GPT-4o, Gemini) are used in this system.
+
 ---
 
 ## 15. Evaluation and Benchmarking
@@ -1140,7 +1370,10 @@ Purpose: bounded language generalization beyond one prompt template.
 | Goal Condition Accuracy (GCA) | 90% | Final state matches parsed goal relation/destination |
 | Command Interpretation Accuracy (CIA) | 85% | Grounding correctness before execution |
 | Task Completion Rate (TCR) | 80% | Episodes completed without timeout or forced abort |
+| Replanning Success Rate (RSR) | ≥ 60% | Episodes that triggered replanning and still succeeded |
 | Error Analysis Coverage | 100% | Every failure labeled into a cause taxonomy |
+
+RSR is defined as: episodes where `memory["replan_triggered"] == True` AND `memory["episode_done"] == True`, divided by all episodes where `memory["replan_triggered"] == True`. A target of ≥ 60% indicates the replanning path is useful rather than a dead end.
 
 ### 15.4 Additional Operational Metrics
 
@@ -1176,6 +1409,8 @@ Every failed episode must be assigned a root cause from the following categories
 - IK / motion failure,
 - grasp failure,
 - unstable placement,
+- agent reasoning failure (agent called wrong tool, wrong argument, or chose incorrect skill order),
+- replanning exhausted (replan triggered but retry budget exceeded before success),
 - timeout,
 - or verifier mismatch.
 
@@ -1195,6 +1430,8 @@ Recommended ablations:
    - Evaluate brittleness under fixed-layout overfitting.
 5. **No goal verifier**
    - Show why end-state checks matter for honest evaluation.
+6. **No replanning (single-pass baseline)**
+   - Disable the replanning path: if the first skill sequence fails or the verifier returns `"retry"` or `"replan"`, mark the episode as failed immediately. Compare TSR and GCA against the full agentic loop to quantify the replanning contribution. This ablation directly isolates the value of episode memory and the Verifier Agent's recovery signal.
 
 ### 15.8 Important Integrity Note
 
@@ -1286,8 +1523,12 @@ The project is designed to use only open-source or openly accessible tooling for
 - PyTorch
 - Ultralytics YOLO
 - Hugging Face Transformers
+- Open-weight VLM for Planner Agent orchestration (Qwen2.5-VL-7B or Llama 3.2-Vision-11B — final selection via Section 14.10 benchmarking)
+- vLLM or llama.cpp for local VLM inference (no proprietary API calls)
 - optional ROS2
 - NumPy / SciPy / OpenCV
+
+**No proprietary inference APIs are used.** The Planner Agent runs entirely on locally hosted open-weight model weights. This ensures the submission is fully reproducible without requiring external service accounts, API keys, or rate-limited endpoints.
 
 ### 17.2 Model Selection Policy
 
@@ -1474,13 +1715,17 @@ The simulation-first plan makes it easier to produce a reliable, clean demo vide
 
 The project can be pitched clearly:
 
-"We built a simulation-first VLA manipulation system that understands natural-language commands, reasons over multi-object scenes, executes structured manipulation policies, verifies final goals quantitatively, and is designed to transfer to a real low-cost arm."
+"We built a simulation-first VLA manipulation system where an open-weight language model acts as a Planner Agent — calling perception, grounding, skill execution, and verification as structured tools. The agent maintains episode memory, replans on failure, and logs every decision. The system understands natural-language commands, reasons over multi-object scenes, executes hierarchical manipulation policies, verifies final goals quantitatively, and is designed to transfer to a real low-cost arm."
 
-That is a coherent and memorable competition story.
+That is a coherent, distinctive, and memorable competition story. The agentic framing immediately separates it from pipeline-only submissions.
 
 ### 21.5 It Has Real Continuation Value
 
 The sim-to-real pathway means this is not only a hackathon artifact. It is the front end of a larger embodied AI system with practical relevance.
+
+### 21.6 It Has a Genuine Agentic Architecture
+
+Most hackathon robotics submissions fall into one of two failure modes: either a scripted demo with no AI, or a LLM that outputs joint angles directly with no verification. This system does neither. The Planner Agent is a real open-weight VLM that calls a structured tool suite, reads tool results, tracks episode state in memory, and adapts its next action accordingly. The Verifier Agent provides a structured judgment that can trigger replanning — not just a binary pass/fail. The decision log provides full traceability of every tool call and recovery step. This is the architecture that current AI-for-robotics research is converging on (see SayCan, Code as Policies, ReAct), and this project implements it with open-weight models and no proprietary dependencies.
 
 ---
 
@@ -1488,9 +1733,11 @@ The sim-to-real pathway means this is not only a hackathon artifact. It is the f
 
 This report presents a simulation-first hybrid blueprint for AX Hackathon Problem Statement 1: a Vision-Language-Action robotic manipulation system that can interpret natural-language instructions, reason over multi-object tabletop scenes, execute structured manipulation behavior, and verify whether the final scene satisfies the intended goal. The core design prioritizes simulation because simulation is the right validation substrate for the hackathon deliverable, but it preserves a clean extension path to a real low-cost 4-DOF robotic arm.
 
-The system's central strengths are its balance of ambition and discipline. It does not claim unrestricted general intelligence or open-world manipulation. Instead, it targets a bounded but meaningful task family and defines exactly how success will be measured. By combining structured language grounding, hierarchical skill execution, explicit goal-condition evaluation, and reproducible benchmarking, the project aims to deliver something more valuable than a superficial demo: an embodied AI system that can be evaluated honestly, improved systematically, and extended beyond the hackathon.
+The system's central architectural contribution is a **genuine agentic layer**: an open-weight Planner Agent that orchestrates perception, grounding, skill execution, and goal verification through a structured tool suite. The agent maintains episode memory, supports goal-driven replanning when skills fail, and logs every tool call to a structured decision log. This design is grounded in the current research lineage — SayCan, Code as Policies, ReAct — and extends it with open-weight models, no proprietary API dependencies, and a verifiable robotics benchmark.
 
-If implemented as specified, this project would represent a strong and credible competition entry: one that is aligned to the brief, technically differentiated, demo-ready, and architecturally mature enough to continue into real-world robotics work after the event.
+The system's broader strengths are its balance of ambition and discipline. It does not claim unrestricted general intelligence or open-world manipulation. Instead, it targets a bounded but meaningful task family and defines exactly how success will be measured. By combining agentic orchestration, structured language grounding, hierarchical skill execution, explicit goal-condition evaluation, and reproducible benchmarking, the project aims to deliver something more valuable than a superficial demo: an embodied AI system that can be evaluated honestly, improved systematically, and extended beyond the hackathon.
+
+If implemented as specified, this project would represent a strong and credible competition entry: one that is aligned to the brief, technically differentiated, genuinely agentic, demo-ready, and architecturally mature enough to continue into real-world robotics work after the event.
 
 ---
 
