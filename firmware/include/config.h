@@ -12,9 +12,8 @@
 #define SERVO_ID_J2       0x04
 #define SERVO_ID_J3       0x05    // Gripper
 
-// ── ISM330DHCX (VSPI bus) ────────────────────────────────────────────────────
-#define IMU_SPI_CS        5        // GPIO5
-#define IMU_SPI_FREQ      10000000UL  // 10MHz
+// ── ISM330DHCX (shared I2C bus with ToF) ─────────────────────────────────────
+#define IMU_I2C_ADDR      0x6B     // SA0/POCI=HIGH → address 0x6B
 
 // ── VL53L5CX (Wire / I2C0 bus) ───────────────────────────────────────────────
 #define TOF_SDA           21       // GPIO21
@@ -37,7 +36,7 @@
 #define TEMP_CUTOFF_C     80.0f
 
 // ── Contact oracle ───────────────────────────────────────────────────────────
-#define CONTACT_WINDOW    20      // samples at 6667Hz = 3.0ms
+#define CONTACT_WINDOW    8       // samples at 208Hz = ~38ms
 #define CONTACT_THRESHOLD 3.5f   // deg/s RMS, calibrate empirically
 
 // ── USB Serial baud (via onboard CH340/CP2102 bridge) ────────────────────────

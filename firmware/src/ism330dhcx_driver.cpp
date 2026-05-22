@@ -1,78 +1,52 @@
 #include "ism330dhcx_driver.h"
 #include "config.h"
 #include "contact_oracle.h"
-#include <SPI.h>
+#include <Wire.h>
 
-// ISM330DHCX Register Definitions
-#define ISM_WHO_AM_I         0x0F  // Expected value: 0x6B
-#define ISM_CTRL1_XL         0x10  // Accelerometer ODR & range
-#define ISM_CTRL2_G          0x11  // Gyroscope ODR & range
-#define ISM_CTRL3_C          0x12  // Control register 3
-#define ISM_FIFO_CTRL1       0x07  // FIFO watermark low
-#define ISM_FIFO_CTRL2       0x08  // FIFO watermark high + config
-#define ISM_FIFO_CTRL3       0x09  // FIFO batch data rates
-#define ISM_FIFO_CTRL4       0x0A  // FIFO mode and config
-#define ISM_FIFO_STATUS1     0x3A  // FIFO level low
-#define ISM_FIFO_STATUS2     0x3B  // FIFO level high + flags
+#define ISM_WHO_AM_I          0x0F
+#define ISM_CTRL1_XL          0x10
+#define ISM_CTRL2_G           0x11
+#define ISM_CTRL3_C           0x12
+#define ISM_FIFO_CTRL3        0x09
+#define ISM_FIFO_CTRL4        0x0A
+#define ISM_FIFO_STATUS1      0x3A
+#define ISM_FIFO_STATUS2      0x3B
 #define ISM_FIFO_DATA_OUT_TAG 0x78
 
 #define GYRO_SENSITIVITY_MDPS_PER_LSB   8.75f
 #define ACCEL_SENSITIVITY_MG_PER_LSB    0.061f
 #define G_TO_MS2                        0.00980665f
 
-static ImuData latest_imu = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+static ImuData latest_imu = {};
 
-// SPI helper: write one register
 static void imu_write_reg(uint8_t reg, uint8_t val) {
-    digitalWrite(IMU_SPI_CS, LOW);
-    SPI.beginTransaction(SPISettings(IMU_SPI_FREQ, MSBFIRST, SPI_MODE0));
-    SPI.transfer(reg & 0x7F);  // bit7=0 for write
-    SPI.transfer(val);
-    SPI.endTransaction();
-    digitalWrite(IMU_SPI_CS, HIGH);
+    Wire.beginTransmission(IMU_I2C_ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    Wire.endTransmission();
 }
 
-// SPI helper: read one register
 static uint8_t imu_read_reg(uint8_t reg) {
-    uint8_t val;
-    digitalWrite(IMU_SPI_CS, LOW);
-    SPI.beginTransaction(SPISettings(IMU_SPI_FREQ, MSBFIRST, SPI_MODE0));
-    SPI.transfer(reg | 0x80);  // bit7=1 for read
-    val = SPI.transfer(0x00);
-    SPI.endTransaction();
-    digitalWrite(IMU_SPI_CS, HIGH);
-    return val;
+    Wire.beginTransmission(IMU_I2C_ADDR);
+    Wire.write(reg);
+    Wire.endTransmission(false);
+    Wire.requestFrom((uint8_t)IMU_I2C_ADDR, (uint8_t)1);
+    return Wire.available() ? Wire.read() : 0xFF;
 }
 
 void imu_init() {
-    pinMode(IMU_SPI_CS, OUTPUT);
-    digitalWrite(IMU_SPI_CS, HIGH);
-    SPI.begin();
-    delay(10);
-
-    // Verify WHO_AM_I
+    // Wire already started by tof_driver on GPIO21/22 — shared bus
     while (imu_read_reg(ISM_WHO_AM_I) != 0x6B) {
-        Serial.println("IMU not found! Retrying IMU SPI WHO_AM_I check...");
+        Serial.println("IMU not found on I2C — retrying...");
         delay(500);
     }
 
-    // CTRL3_C: BDU=1 (Block Data Update), IF_INC=1 (auto increment address for burst reads)
-    imu_write_reg(ISM_CTRL3_C, 0x44);
-
-    // CTRL1_XL: ODR_XL[3:0]=1010 (6.67kHz), FS_XL[1:0]=00 (±2g range) -> 0xA0
-    imu_write_reg(ISM_CTRL1_XL, 0xA0);
-
-    // CTRL2_G: ODR_G[3:0]=1010 (6.67kHz), FS_G[1:0]=00 (±250dps range) -> 0xA0
-    imu_write_reg(ISM_CTRL2_G, 0xA0);
-
-    // FIFO_CTRL3: Gyro and Accel batch at 6.67kHz
-    // Gyro batch rate BDR_GY[3:0]=1010, Accel batch rate BDR_XL[3:0]=1010 -> 0xAA
-    imu_write_reg(ISM_FIFO_CTRL3, 0xAA);
-
-    // FIFO_CTRL4: FIFO Mode = Continuous (overwrites oldest on full) -> 0x06
-    imu_write_reg(ISM_FIFO_CTRL4, 0x06);
-
-    delay(5);  // ODR settling
+    imu_write_reg(ISM_CTRL3_C,    0x44);  // BDU=1, IF_INC=1
+    imu_write_reg(ISM_CTRL1_XL,   0x60);  // 208 Hz, ±2 g
+    imu_write_reg(ISM_CTRL2_G,    0x60);  // 208 Hz, ±250 dps
+    imu_write_reg(ISM_FIFO_CTRL3, 0x66);  // batch accel+gyro at 208 Hz
+    imu_write_reg(ISM_FIFO_CTRL4, 0x06);  // FIFO continuous mode
+    delay(5);
 }
 
 bool imu_who_am_i() {
@@ -80,42 +54,39 @@ bool imu_who_am_i() {
 }
 
 uint16_t imu_fifo_depth() {
-    uint8_t status1 = imu_read_reg(ISM_FIFO_STATUS1);
-    uint8_t status2 = imu_read_reg(ISM_FIFO_STATUS2);
-    // Depth is stored in 10-bit format
-    return (((uint16_t)(status2 & 0x03) << 8) | status1);
+    uint8_t s1 = imu_read_reg(ISM_FIFO_STATUS1);
+    uint8_t s2 = imu_read_reg(ISM_FIFO_STATUS2);
+    return (((uint16_t)(s2 & 0x03) << 8) | s1);
 }
 
 void imu_fifo_read_batch() {
-    uint16_t samples = imu_fifo_depth();
+    uint16_t depth = imu_fifo_depth();
+    if (depth == 0) return;
 
-    // Burst read all available FIFO words (each word is 7 bytes: 1 tag + 6 data)
-    for (uint16_t i = 0; i < samples; i++) {
+    // 208 Hz @ 50 Hz poll ≈ 4 samples; cap at 12 to stay within Wire 128-byte buffer
+    uint8_t n = (uint8_t)(depth > 12 ? 12 : depth);
+
+    Wire.beginTransmission(IMU_I2C_ADDR);
+    Wire.write(ISM_FIFO_DATA_OUT_TAG);
+    Wire.endTransmission(false);
+    Wire.requestFrom((uint8_t)IMU_I2C_ADDR, (uint8_t)(n * 7));
+
+    for (uint8_t i = 0; i < n; i++) {
         uint8_t word[7];
-        
-        digitalWrite(IMU_SPI_CS, LOW);
-        SPI.beginTransaction(SPISettings(IMU_SPI_FREQ, MSBFIRST, SPI_MODE0));
-        SPI.transfer(ISM_FIFO_DATA_OUT_TAG | 0x80);
-        for (int b = 0; b < 7; b++) {
-            word[b] = SPI.transfer(0x00);
-        }
-        SPI.endTransaction();
-        digitalWrite(IMU_SPI_CS, HIGH);
+        for (int b = 0; b < 7; b++)
+            word[b] = Wire.available() ? Wire.read() : 0;
 
         uint8_t tag = word[0] >> 3;
         int16_t x = (int16_t)(word[1] | (word[2] << 8));
         int16_t y = (int16_t)(word[3] | (word[4] << 8));
         int16_t z = (int16_t)(word[5] | (word[6] << 8));
 
-        if (tag == 0x01) {  // Gyroscope NC sample
+        if (tag == 0x01) {  // gyroscope sample
             latest_imu.gx = (float)x * GYRO_SENSITIVITY_MDPS_PER_LSB / 1000.0f;
             latest_imu.gy = (float)y * GYRO_SENSITIVITY_MDPS_PER_LSB / 1000.0f;
             latest_imu.gz = (float)z * GYRO_SENSITIVITY_MDPS_PER_LSB / 1000.0f;
-            
-            // Push high-frequency gyro data directly to contact oracle
             contact_oracle_push(latest_imu.gx, latest_imu.gy, latest_imu.gz);
-        } 
-        else if (tag == 0x02) {  // Accelerometer NC sample
+        } else if (tag == 0x02) {  // accelerometer sample
             latest_imu.ax = (float)x * ACCEL_SENSITIVITY_MG_PER_LSB * G_TO_MS2;
             latest_imu.ay = (float)y * ACCEL_SENSITIVITY_MG_PER_LSB * G_TO_MS2;
             latest_imu.az = (float)z * ACCEL_SENSITIVITY_MG_PER_LSB * G_TO_MS2;
