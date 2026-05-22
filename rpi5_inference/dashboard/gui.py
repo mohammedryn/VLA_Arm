@@ -16,9 +16,12 @@ from collections import deque
 from typing import Deque
 
 import numpy as np
+import serial
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QGridLayout, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QSizePolicy, QFrame,
+    QLineEdit, QTextEdit,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QFont, QPen, QBrush
@@ -47,6 +50,52 @@ SKILL_COLORS_MPL = {
     "LIFT":  "#3CB371",
     "PLACE": "#CD5C5C",
 }
+
+
+# ── Servo commander ───────────────────────────────────────────────────────────
+
+SERVO_PORT   = '/dev/ttyUSB0'
+SERVO_BAUD   = 1_000_000
+SERVO_IDS    = [0x01, 0x02, 0x03, 0x04, 0x05]   # J0 J1A J1B J2 J3
+GOAL_POS_REG = 0x2A                               # Goal Position (STS/SMS series)
+
+# ── Edit these to match your arm positions (steps, 0–4095 = 0–360°) ───────────
+PICK_POSE = [2048, 1800, 1800, 2200, 1500]   # J0 J1A J1B J2 J3
+HOME_POSE = [2048, 2048, 2048, 2048, 2048]
+
+
+class ServoCommander:
+    def __init__(self):
+        self._ser = None
+        self._lock = threading.Lock()
+        try:
+            self._ser = serial.Serial(SERVO_PORT, SERVO_BAUD, timeout=0.1)
+            time.sleep(0.2)
+            self._ser.reset_input_buffer()
+        except Exception:
+            pass
+
+    def connected(self) -> bool:
+        return self._ser is not None and self._ser.is_open
+
+    def send_pose(self, positions: list) -> bool:
+        if not self.connected():
+            return False
+        with self._lock:
+            for sid, pos in zip(SERVO_IDS, positions):
+                pos_l = pos & 0xFF
+                pos_h = (pos >> 8) & 0xFF
+                length = 5
+                instr  = 0x03
+                chk = (~(sid + length + instr + GOAL_POS_REG + pos_l + pos_h)) & 0xFF
+                pkt = bytes([0xFF, 0xFF, sid, length, instr, GOAL_POS_REG, pos_l, pos_h, chk])
+                self._ser.write(pkt)
+                time.sleep(0.005)
+        return True
+
+    def close(self):
+        if self._ser and self._ser.is_open:
+            self._ser.close()
 
 
 # ── Shared state ──────────────────────────────────────────────────────────────
@@ -543,6 +592,66 @@ class StatusBarPanel(QFrame):
         self._hz_lbl.setText(f"{snap['loop_hz']:.1f}")
 
 
+# ── Panel 6: Chat / command console ──────────────────────────────────────────
+
+class ChatPanel(QFrame):
+    command_issued = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameStyle(QFrame.Shape.Box)
+        self.setStyleSheet("background: #0d0d1a; border: 1px solid #444;")
+        self.setFixedHeight(160)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        title = QLabel("Command Console")
+        title.setStyleSheet("color: #aaa; font-size: 11px; font-weight: bold;")
+        layout.addWidget(title)
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setStyleSheet(
+            "background: #12122a; color: #ccc; font-family: 'Courier New'; "
+            "font-size: 11px; border: 1px solid #333;"
+        )
+        layout.addWidget(self._log)
+
+        row = QHBoxLayout()
+        self._input = QLineEdit()
+        self._input.setPlaceholderText("Type a command (e.g. 'pick', 'home') and press Enter...")
+        self._input.setStyleSheet(
+            "background: #1a1a2e; color: #eee; font-family: 'Courier New'; "
+            "font-size: 11px; border: 1px solid #555; padding: 3px 6px;"
+        )
+        self._input.returnPressed.connect(self._on_send)
+        row.addWidget(self._input)
+
+        send_btn = QPushButton("Send")
+        send_btn.setFixedWidth(64)
+        send_btn.setStyleSheet(
+            "QPushButton { background: #1e3a5f; color: #eee; border: 1px solid #4682B4; "
+            "font-size: 11px; padding: 3px; }"
+            "QPushButton:hover { background: #2a5080; }"
+        )
+        send_btn.clicked.connect(self._on_send)
+        row.addWidget(send_btn)
+        layout.addLayout(row)
+
+    def append(self, text: str, color: str = "#ccc"):
+        self._log.append(f'<span style="color:{color};">{text}</span>')
+
+    def _on_send(self):
+        text = self._input.text().strip()
+        if not text:
+            return
+        self._input.clear()
+        self.append(f"&gt; {text}", "#888")
+        self.command_issued.emit(text.lower())
+
+
 # ── Main window ───────────────────────────────────────────────────────────────
 
 class DashboardWindow(QMainWindow):
@@ -550,6 +659,7 @@ class DashboardWindow(QMainWindow):
         super().__init__()
         self._state = state
         self._generator = generator
+        self._commander = ServoCommander()
 
         self.setWindowTitle("VLA Robotic Arm — Live Dashboard")
         self.setMinimumSize(1100, 720)
@@ -582,10 +692,23 @@ class DashboardWindow(QMainWindow):
         self._status.estop_clicked.connect(self._handle_estop)
         grid.addWidget(self._status, 2, 0, 1, 2)
 
-        # Row stretch: panels equal, status bar fixed
+        # Panel 6 — chat / command console (row 3, full width)
+        self._chat = ChatPanel()
+        self._chat.command_issued.connect(self._handle_command)
+        grid.addWidget(self._chat, 3, 0, 1, 2)
+        status_msg = (
+            f"Servo board connected on {SERVO_PORT}"
+            if self._commander.connected()
+            else f"WARNING: servo board not found on {SERVO_PORT} — commands will be ignored"
+        )
+        self._chat.append(status_msg, "#44cc44" if self._commander.connected() else "#ff6644")
+        self._chat.append("Commands: pick | home", "#666")
+
+        # Row stretch: panels equal, status bar + chat fixed
         grid.setRowStretch(0, 1)
         grid.setRowStretch(1, 1)
         grid.setRowStretch(2, 0)
+        grid.setRowStretch(3, 0)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
 
@@ -605,6 +728,17 @@ class DashboardWindow(QMainWindow):
         self._contact.update_data(snap["imu_rms"], snap["gripper_load"])
         self._status.update_status(snap)
 
+    def _handle_command(self, cmd: str):
+        POSES = {"pick": PICK_POSE, "home": HOME_POSE}
+        if cmd not in POSES:
+            self._chat.append(f"Unknown command: '{cmd}'", "#ff6644")
+            return
+        pose = POSES[cmd]
+        self._chat.append(f"Sending {cmd.upper()} pose: {pose}", "#4682B4")
+        ok = self._commander.send_pose(pose)
+        msg = f"{cmd.upper()} done." if ok else "ERROR: servo board not connected."
+        self._chat.append(msg, "#44cc44" if ok else "#ff6644")
+
     def _handle_estop(self):
         with self._state._lock:
             self._state.estop = True
@@ -620,6 +754,10 @@ class DashboardWindow(QMainWindow):
                 border-radius: 6px;
             }
         """)
+
+    def closeEvent(self, event):
+        self._commander.close()
+        super().closeEvent(event)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
