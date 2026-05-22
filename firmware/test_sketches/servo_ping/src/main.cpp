@@ -64,6 +64,7 @@ static void scan_all() {
 
 void setup() {
     Serial.begin(115200);
+    pinMode(SERVO_RX, INPUT_PULLUP);  // enable pull-up on RX2 for open-drain TX output
     Serial2.begin(SERVO_BAUD, SERIAL_8N1, SERVO_RX, SERVO_TX);
     delay(200);
     Serial.println("\n=== Servo Ping Test ===");
