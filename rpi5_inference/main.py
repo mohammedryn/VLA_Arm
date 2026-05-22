@@ -33,6 +33,7 @@ OVERRUN_MS    = LOOP_PERIOD_S * 1e3     # 125.0 — threshold for overrun warnin
 DEFAULT_PORT        = "/dev/ttyACM0"
 DEFAULT_INSTRUCTION = "pick up the red cube"
 DEFAULT_CHECKPOINT  = "checkpoints/yolov8n_vla/weights/best.pt"
+DEFAULT_VLA_CHECKPOINT = "checkpoints/vla_policy_traced.pt"
 
 # Safe hold position used when no target is visible or IK fails.
 _HOLD_JOINTS = np.array([0.0, 22.0, -70.0, 45.0])
@@ -186,6 +187,12 @@ def _gripper_pct(state) -> int:
     return 0 if state in (Skill.GRASP, Skill.LIFT) else 100
 
 
+def setup_pipeline():
+    """Delegate to run_eval.setup_pipeline(). Imported by evaluation scripts."""
+    from rpi5_inference.evaluation.run_eval import setup_pipeline as _sp
+    return _sp()
+
+
 # ── live inference loop ───────────────────────────────────────────────────────
 
 def run_loop(args) -> int:
@@ -200,6 +207,9 @@ def run_loop(args) -> int:
     from rpi5_inference.perception.yolo_detector  import YOLODetector
     from rpi5_inference.perception.pose_estimation import PoseEstimator
     from rpi5_inference.comms.teensy_serial       import TeensySerial
+    from rpi5_inference.perception.camera_manager import CameraManager
+    from rpi5_inference.vla.vla_policy            import VLARuntime
+    from rpi5_inference.vla.action_generator      import ActionGenerator
 
     log = logging.getLogger("vla.loop")
 
@@ -210,6 +220,9 @@ def run_loop(args) -> int:
     sf  = SafetyFilter()
     sm  = SkillStateMachine()
     ts  = TeensySerial(args.port)
+    camera     = CameraManager()
+    vla        = VLARuntime(DEFAULT_VLA_CHECKPOINT, enc)
+    action_gen = ActionGenerator()
 
     # Pre-encode once; cache hit on every tick.
     lang_vec = enc.encode(args.instruction)
@@ -229,7 +242,7 @@ def run_loop(args) -> int:
             telem = ts.latest_telemetry
             if telem is not None:
                 contact  = bool(telem["contact_flag"][0])
-                tof_grid = telem["tof_grid"][0].astype(np.float64)
+                tof_grid = telem["tof_grid"][0].astype(np.float64).reshape(8, 8)
             else:
                 contact  = False
                 tof_grid = np.full((8, 8), 80.0)   # safe fallback [mm]
@@ -237,10 +250,44 @@ def run_loop(args) -> int:
             sm.notify_contact(contact)
 
             # ── 2. Camera → detection ─────────────────────────────────
-            # TODO: replace with camera_manager.get_frame() once integrated
-            frame      = np.zeros((480, 640, 3), dtype=np.uint8)
+            frame = camera.latest_frame()
+            if frame is None:
+                time.sleep(0.005)
+                continue
             detections = det.detect(frame)
             target_det = det.match_instruction(detections, args.instruction)
+
+            # ── 3. VLA predict ────────────────────────────────────────
+            skill_onehot = np.zeros(4, dtype=np.float32)
+            skill_onehot[int(sm.state)] = 1.0
+
+            if telem is not None:
+                tof_raw = np.asarray(telem["tof_grid"]).flatten()
+                center_vals = [float(tof_raw[3*8+3]), float(tof_raw[3*8+4]),
+                               float(tof_raw[4*8+3]), float(tof_raw[4*8+4])]
+                valid_vals  = [z for z in center_vals if 20 < z < 600]
+                tof_z_m     = float(np.mean(valid_vals)) / 1000.0 if valid_vals else 0.3
+                contact_rms_v = float(np.asarray(telem["contact_rms"]).flat[0])
+                j_raw = np.asarray(telem["servo_pos"]).flatten()
+                joint_state_vla = np.array([
+                    j_raw[0],
+                    (j_raw[1] + j_raw[2]) / 2.0,
+                    j_raw[3],
+                    j_raw[4],
+                ], dtype=np.float32)
+            else:
+                tof_z_m         = 0.3
+                contact_rms_v   = 0.0
+                joint_state_vla = _HOLD_JOINTS[:4].astype(np.float32)
+
+            skill_pred, delta_step0, chunk = vla.predict(
+                frame, joint_state_vla, skill_onehot,
+                args.instruction, contact_rms_v, tof_z_m,
+            )
+            action_gen.set_chunk(chunk)
+
+            if skill_pred > int(sm.state) and not sm.done:
+                sm.advance()
 
             # ── 3. Pose → IK → safety ────────────────────────────────
             joints_4 = _HOLD_JOINTS.copy()
@@ -257,6 +304,9 @@ def run_loop(args) -> int:
                                     tick, x, y, z)
                 except Exception as exc:
                     log.warning("Tick %d: pose/IK error: %s", tick, exc)
+
+            # IK-primary: VLA delta is a small additive correction (×0.1 while mock)
+            joints_4[:4] = joints_4[:4] + delta_step0 * 0.1
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -283,6 +333,7 @@ def run_loop(args) -> int:
         log.info("Interrupted after %d ticks (%d overruns). Shutting down.", tick, overruns)
     finally:
         ts.close()
+        camera.close()
 
     return 0
 
