@@ -35,7 +35,8 @@ static uint8_t imu_read_reg(uint8_t reg) {
 }
 
 void imu_init() {
-    // Wire already started by tof_driver on GPIO21/22 — shared bus
+    Wire.begin(TOF_SDA, TOF_SCL);
+    Wire.setClock(400000);
     while (imu_read_reg(ISM_WHO_AM_I) != 0x6B) {
         Serial.println("IMU not found on I2C — retrying...");
         delay(500);
