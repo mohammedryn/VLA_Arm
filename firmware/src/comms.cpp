@@ -17,11 +17,8 @@ static uint16_t compute_telemetry_checksum(const uint8_t* data, size_t len) {
 
 void comms_send_telemetry(const ControllerTelemetry_t* pkt) {
     ControllerTelemetry_t local = *pkt;
-    
-    // Calculate the 16-bit checksum over all preceding 248 bytes
-    // (everything in ControllerTelemetry_t except the final 2-byte checksum field itself)
+    local.magic = TELEMETRY_MAGIC;
     local.checksum = compute_telemetry_checksum((const uint8_t*)&local, sizeof(ControllerTelemetry_t) - sizeof(local.checksum));
-    
     Serial.write((const uint8_t*)&local, sizeof(ControllerTelemetry_t));
 }
 

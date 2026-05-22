@@ -1,8 +1,9 @@
 #pragma once
 #include <Arduino.h>
 
-// ESP32 → RPi5 Telemetry Packet (250 bytes, sent at 50Hz)
+// ESP32 → RPi5 Telemetry Packet (254 bytes, sent at 50Hz)
 typedef struct __attribute__((packed)) {
+    uint32_t magic;              // Always TELEMETRY_MAGIC (0xA55AA55A) — packet framing
     uint32_t timestamp_us;      // ESP32 microsecond counter (from micros())
     float    servo_pos[5];      // Servo positions in degrees [J0, J1a, J1b, J2, J3]
     float    servo_load[5];     // Normalized load 0.0–1.0 [same order]

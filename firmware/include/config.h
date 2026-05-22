@@ -28,7 +28,8 @@
 #define CONTROL_PERIOD_MS 20       // 20ms period for vTaskDelayUntil
 
 // ── Packet sizes ─────────────────────────────────────────────────────────────
-#define TELEMETRY_SIZE    250
+#define TELEMETRY_SIZE    254
+#define TELEMETRY_MAGIC   0xA55AA55AUL
 #define COMMAND_SIZE      20
 
 // ── Temperature thresholds ───────────────────────────────────────────────────

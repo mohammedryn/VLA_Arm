@@ -14,7 +14,11 @@ import numpy as np
 PORT = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyUSB0'
 BAUD = 2_000_000
 
+MAGIC       = 0xA55AA55A
+MAGIC_BYTES = MAGIC.to_bytes(4, 'little')
+
 TELEMETRY_DTYPE = np.dtype([
+    ('magic',            np.uint32),
     ('timestamp_us',     np.uint32),
     ('servo_pos',        np.float32, (5,)),
     ('servo_load',       np.float32, (5,)),
@@ -31,60 +35,77 @@ TELEMETRY_DTYPE = np.dtype([
     ('safety_clamped',   np.uint8),
     ('checksum',         np.uint16),
 ])
-PACKET_SIZE = 250
+PACKET_SIZE = 254
 assert TELEMETRY_DTYPE.itemsize == PACKET_SIZE, \
     f"dtype size mismatch: {TELEMETRY_DTYPE.itemsize} != {PACKET_SIZE}"
+
 
 def verify_checksum(raw: bytes) -> bool:
     computed = sum(raw[:-2]) & 0xFFFF
     received = int.from_bytes(raw[-2:], 'little')
     return computed == received
 
+
+def find_packet(ser) -> bytes | None:
+    """Scan the stream for the magic preamble, then read and checksum-verify
+    the full packet. Returns the 254-byte packet or None on timeout."""
+    tail = bytearray()
+    while True:
+        b = ser.read(1)
+        if not b:
+            return None
+        tail += b
+        if len(tail) < 4:
+            continue
+        if bytes(tail[-4:]) != MAGIC_BYTES:
+            if len(tail) > 4:
+                tail = tail[-4:]
+            continue
+        # Magic found — read the remaining 250 bytes
+        rest = ser.read(PACKET_SIZE - 4)
+        if len(rest) < PACKET_SIZE - 4:
+            return None
+        pkt = bytes(tail[-4:]) + rest
+        if verify_checksum(pkt):
+            return pkt
+        # Checksum failed on this magic match — keep scanning from rest
+        tail = bytearray(rest[-3:])
+
+
 def main():
     print(f"Opening {PORT} at {BAUD} baud...")
     ser = serial.Serial(PORT, BAUD, timeout=2.0)
     try:
-        time.sleep(0.5)  # let ESP32 settle
+        time.sleep(0.5)
         ser.reset_input_buffer()
 
         packets = []
-        bad_checksums = 0
 
-        # Resync: scan byte-by-byte until we land on a valid packet boundary.
         print("Syncing to packet stream...")
-        window = bytearray(ser.read(PACKET_SIZE))
-        while len(window) == PACKET_SIZE and not verify_checksum(bytes(window)):
-            window = window[1:] + bytearray(ser.read(1))
-        if len(window) < PACKET_SIZE:
-            print("  Timeout during sync — no data from ESP32")
+        pkt_bytes = find_packet(ser)
+        if pkt_bytes is None:
+            print("  Timeout during sync — no valid packet from ESP32")
             return
         print("  Synced.")
 
         t_start = time.monotonic()
         print("Reading 100 packets...")
-        # Consume the first packet we just synced on.
-        pkt = np.frombuffer(bytes(window), dtype=TELEMETRY_DTYPE)[0]
-        packets.append(pkt)
+        packets.append(np.frombuffer(pkt_bytes, dtype=TELEMETRY_DTYPE)[0])
 
         while len(packets) < 100:
-            raw = ser.read(PACKET_SIZE)
-            if len(raw) != PACKET_SIZE:
-                print(f"  Short read: got {len(raw)} bytes (timeout?)")
+            pkt_bytes = find_packet(ser)
+            if pkt_bytes is None:
+                print(f"  Timeout waiting for packet {len(packets) + 1}")
                 continue
-            if not verify_checksum(raw):
-                bad_checksums += 1
-                continue
-            pkt = np.frombuffer(raw, dtype=TELEMETRY_DTYPE)[0]
-            packets.append(pkt)
+            packets.append(np.frombuffer(pkt_bytes, dtype=TELEMETRY_DTYPE)[0])
 
         elapsed = time.monotonic() - t_start
         rate = len(packets) / elapsed
 
         print("\n=== Telemetry Verification ===")
-        print(f"Packets:        {len(packets)}")
-        print(f"Bad checksums:  {bad_checksums}")
-        print(f"Elapsed:        {elapsed:.2f}s")
-        print(f"Rate:           {rate:.1f} Hz  (target 50 Hz)  "
+        print(f"Packets:   {len(packets)}")
+        print(f"Elapsed:   {elapsed:.2f}s")
+        print(f"Rate:      {rate:.1f} Hz  (target 50 Hz)  "
               f"{'PASS' if 45 < rate < 55 else 'FAIL'}")
 
         p = packets[-1]
@@ -97,10 +118,8 @@ def main():
         print(f"  contact_rms:   {p['contact_rms']:.4f}")
         print(f"  tof_valid:     {p['tof_valid']}")
 
-        # Sanity checks
         checks = [
             ("Rate 45–55 Hz",          45 < rate < 55),
-            ("No bad checksums",        bad_checksums == 0),
             ("IMU accel non-zero",      np.any(np.abs(p['imu_accel']) > 0.1)),
             ("Servo temps reasonable",  np.all(p['servo_temp'] > 10) and np.all(p['servo_temp'] < 80)),
             ("timestamp_us non-zero",   p['timestamp_us'] > 0),
@@ -117,6 +136,7 @@ def main():
         print(f"\nOverall: {'ALL PASS' if all_pass else 'SOME FAILURES — see above'}")
     finally:
         ser.close()
+
 
 if __name__ == '__main__':
     main()

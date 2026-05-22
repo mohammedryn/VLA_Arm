@@ -29,7 +29,7 @@ void control_task(void* pvParameters) {
     bool  have_first_cmd     = false;
 
     // Static assertions (guaranteeing exact specification struct byte sizes)
-    static_assert(sizeof(ControllerTelemetry_t) == 250, "ERROR: ControllerTelemetry_t size must be exactly 250 bytes!");
+    static_assert(sizeof(ControllerTelemetry_t) == 254, "ERROR: ControllerTelemetry_t size must be exactly 254 bytes!");
     static_assert(sizeof(RPiCommand_t) == 20, "ERROR: RPiCommand_t size must be exactly 20 bytes!");
 
     Serial.println("Control Task: Initialized and running on Core 1.");
@@ -157,9 +157,12 @@ void control_task(void* pvParameters) {
     }
 }
 
-// ── Core 0: High-Speed Serial Comms Task (Lower Priority) ─────────────────────
+// ── Core 0: 50Hz Serial Comms Task (Lower Priority) ───────────────────────────
 void comms_task(void* pvParameters) {
     Serial.println("Comms Task: Initialized and running on Core 0.");
+
+    TickType_t lastWakeTime = xTaskGetTickCount();
+    const TickType_t period = pdMS_TO_TICKS(CONTROL_PERIOD_MS);  // 20ms = 50Hz
 
     while (true) {
         // Step A: Send the latest telemetry snapshot to the Raspberry Pi 5
@@ -179,8 +182,7 @@ void comms_task(void* pvParameters) {
             }
         }
 
-        // Yield CPU control for 1ms to give other background Core 0 tasks headroom
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelayUntil(&lastWakeTime, period);
     }
 }
 
