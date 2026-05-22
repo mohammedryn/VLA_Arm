@@ -344,6 +344,8 @@ if skill_pred > int(sm.state) and not sm.done:
     sm.advance()
 ```
 
+Note: `sm.done` guard prevents `advance()` being called at terminal state (PLACE), which would raise `ValueError` in the actual `SkillStateMachine` implementation.
+
 **6. `setup_pipeline()` function** added at module level — delegates to `run_eval.setup_pipeline()`:
 ```python
 def setup_pipeline():
@@ -382,13 +384,19 @@ Places arm at known distances (100mm, 200mm, 300mm from a flat surface). Reads T
 
 ### Stub YAML files (placeholders so `PoseEstimator` loads without error)
 
+**Note:** `PoseEstimator()` takes no constructor args and falls back to hardcoded dummy values if any YAML is missing (warns but doesn't crash). Stubs prevent the warning on clean boot.
+
+Key names come from the actual `pose_estimation.py`, not the workplan.
+
 #### `rpi5_inference/calibration/camera_intrinsics.yaml`
 ```yaml
 # Placeholder — run camera_calibrate.py to get real values
-K: [600.0, 0.0, 320.0,
-    0.0, 600.0, 240.0,
-    0.0, 0.0, 1.0]
-dist: [0.0, 0.0, 0.0, 0.0, 0.0]
+# Keys must match PoseEstimator._load_intrinsics: fx, fy, cx, cy, dist_coeffs
+fx: 600.0
+fy: 600.0
+cx: 320.0
+cy: 240.0
+dist_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
 ```
 
 #### `rpi5_inference/calibration/camera_extrinsics.yaml`
@@ -400,19 +408,13 @@ tvec: [0.0, 0.0, 0.5]
 
 #### `rpi5_inference/calibration/homography_dots.yaml`
 ```yaml
-# Placeholder — measure actual dot pixel coordinates on workspace mat
-# pixel_pts: [u, v] for each of 4 calibration dots (corners of workspace)
-# world_pts: [x_m, y_m] corresponding robot base-frame positions
-pixel_pts:
-  - [100, 100]
-  - [540, 100]
-  - [540, 380]
-  - [100, 380]
-world_pts:
-  - [-0.15,  0.25]
-  - [ 0.15,  0.25]
-  - [ 0.15,  0.10]
-  - [-0.15,  0.10]
+# Placeholder — measure actual A/B/C/D dot pixel coords on workspace mat
+# Keys must match PoseEstimator._load_homography: A_px, B_px, C_px, D_px
+# World positions are fixed: A=(-0.18,0.10) B=(+0.18,0.10) C=(+0.18,0.22) D=(-0.18,0.22)
+A_px: [100.0, 400.0]
+B_px: [540.0, 400.0]
+C_px: [480.0, 220.0]
+D_px: [160.0, 220.0]
 ```
 
 ---
