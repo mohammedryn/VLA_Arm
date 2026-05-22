@@ -14,23 +14,33 @@ static bool ping_servo(uint8_t id) {
     pkt[0] = 0xFF;
     pkt[1] = 0xFF;
     pkt[2] = id;
-    pkt[3] = 2;                                    // length
-    pkt[4] = 0x01;                                 // PING instruction
-    pkt[5] = ~(id + 2 + 0x01) & 0xFF;             // checksum
+    pkt[3] = 2;
+    pkt[4] = 0x01;
+    pkt[5] = ~(id + 2 + 0x01) & 0xFF;
+
+    Serial.printf("  [DBG] sending ping to ID 0x%02X: ", id);
+    for (int i = 0; i < 6; i++) Serial.printf("%02X ", pkt[i]);
+    Serial.println();
 
     Serial2.write(pkt, 6);
-    Serial2.flush();  // wait for TX to drain before listening
+    Serial2.flush();
 
-    // Drain any echo bytes that appear on the half-duplex bus
-    delayMicroseconds(300);  // 6 bytes @ 1Mbps = 60µs; 300µs gives margin
-    while (Serial2.available()) Serial2.read();
+    // Drain echo (half-duplex bus reflects TX back on RX)
+    delayMicroseconds(600);  // doubled margin
+    uint8_t echo_count = 0;
+    while (Serial2.available()) { Serial2.read(); echo_count++; }
+    Serial.printf("  [DBG] drained %d echo bytes\n", echo_count);
 
-    uint8_t resp[6];
+    uint8_t resp[16];
     uint8_t idx = 0;
-    uint32_t deadline = micros() + 10000;  // 10ms timeout
-    while (micros() < deadline && idx < 6) {
+    uint32_t deadline = micros() + 50000;  // 50ms timeout (5x longer)
+    while (micros() < deadline && idx < 16) {
         if (Serial2.available()) resp[idx++] = Serial2.read();
     }
+
+    Serial.printf("  [DBG] received %d bytes: ", idx);
+    for (int i = 0; i < idx; i++) Serial.printf("%02X ", resp[i]);
+    Serial.println();
 
     if (idx < 6) return false;
     if (resp[0] != 0xFF || resp[1] != 0xFF) return false;
