@@ -44,7 +44,6 @@ bool comms_receive_command(RPiCommand_t* cmd_out) {
     
     // If the checksum fails, discard the packet to prevent erratic robot motion
     if (cmd.checksum != expected_checksum) {
-        Serial.println(">>> DEBUG ERROR: RPiCommand Checksum Mismatch! <<<");
         return false;
     }
     

@@ -145,7 +145,7 @@ ServoTelemetry servo_read_telemetry(uint8_t id) {
         // Present Load (0x3C, 0x3D)
         int16_t raw_load = (int16_t)(data[4] | (data[5] << 8));
         int16_t load_val = raw_load & 0x03FF;
-        telem.load_norm = (float)load_val / 1000.0f;
+        telem.load_norm = (float)load_val / 1023.0f;
         if (raw_load & 0x0400) {
             telem.load_norm = -telem.load_norm; // keep sign if direction is indicated
         }
