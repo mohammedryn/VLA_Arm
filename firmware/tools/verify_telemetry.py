@@ -49,9 +49,23 @@ def main():
 
         packets = []
         bad_checksums = 0
-        t_start = time.monotonic()
 
+        # Resync: scan byte-by-byte until we land on a valid packet boundary.
+        print("Syncing to packet stream...")
+        window = bytearray(ser.read(PACKET_SIZE))
+        while len(window) == PACKET_SIZE and not verify_checksum(bytes(window)):
+            window = window[1:] + bytearray(ser.read(1))
+        if len(window) < PACKET_SIZE:
+            print("  Timeout during sync — no data from ESP32")
+            return
+        print("  Synced.")
+
+        t_start = time.monotonic()
         print("Reading 100 packets...")
+        # Consume the first packet we just synced on.
+        pkt = np.frombuffer(bytes(window), dtype=TELEMETRY_DTYPE)[0]
+        packets.append(pkt)
+
         while len(packets) < 100:
             raw = ser.read(PACKET_SIZE)
             if len(raw) != PACKET_SIZE:
