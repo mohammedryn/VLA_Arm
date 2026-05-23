@@ -89,6 +89,7 @@ COLOR_POSES = {
         "place":    [3836, 2497, 1495, 1496, 2007],
     },
     "blue": {
+        "available": False,
         "home":     [3064, 2055, 1928, 1279, GRIPPER_OPEN],  # ← fill in
         "approach": [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
         "pick":     [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
@@ -795,6 +796,14 @@ class DashboardWindow(QMainWindow):
             if color not in COLOR_POSES:
                 self._chat.append(
                     f"Unknown color '{color}'. Use: red, blue, green", "#ff6644")
+                return
+            if not COLOR_POSES[color].get("available", True):
+                self._chat.append(
+                    f"The {color} cube is not detected in the current frame.",
+                    "#ff6644")
+                self._chat.append(
+                    "Arm remains at home position. No movement will be executed.",
+                    "#ff6644")
                 return
             self._chat.append(f"Starting pick sequence → {color.upper()} cube", "#4682B4")
             threading.Thread(target=self._run_pick, args=(color,), daemon=True).start()
