@@ -62,27 +62,30 @@ GOAL_POS_REG = 0x2A                               # Goal Position (STS/SMS serie
 # ── Fill in all poses below (servo steps, 0–4095 = 0°–360°) ──────────────────
 # Use read_servos.py to read live positions while you pose the arm manually.
 
-GRIPPER_OPEN   = 500   # ← replace
-GRIPPER_CLOSED = 1500  # ← replace
+GRIPPER_OPEN   = 1540
+GRIPPER_CLOSED = 1795
 
-HOME_POSE = [2048, 2048, 2048, 2048, GRIPPER_OPEN]  # ← replace
+HOME_POSE = [3064, 2055, 1928, 1279, GRIPPER_OPEN]
 
-# Per-color pick sequences — each entry: [J0, J1A, J1B, J2, J3]
-# "approach" = above the cube (gripper open)
-# "pick"     = lowered to cube level (gripper open)
-# grasp/lift are computed automatically from pick + GRIPPER_CLOSED
+# Per-color pick sequences: [J0, J1A, J1B, J2, J3] in servo steps
+# "approach" = position above/at the cube, gripper open
+# "pick"     = same as approach (adjust if you want a separate lower step)
+# "lift"     = where the arm goes after grasping
 COLOR_POSES = {
     "red": {
-        "approach": [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
-        "pick":     [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
+        "approach": [3063, 2607, 1393, 1806, GRIPPER_OPEN],
+        "pick":     [3063, 2607, 1393, 1806, GRIPPER_OPEN],
+        "lift":     [3064, 1969, 2014, 1805, 1862],
     },
     "blue": {
-        "approach": [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
-        "pick":     [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
+        "approach": [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
+        "pick":     [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
+        "lift":     [3064, 1969, 2014, 1805, 1862],          # ← fill in
     },
     "green": {
-        "approach": [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
-        "pick":     [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
+        "approach": [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
+        "pick":     [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
+        "lift":     [3064, 1969, 2014, 1805, 1862],          # ← fill in
     },
 }
 
@@ -806,11 +809,9 @@ class DashboardWindow(QMainWindow):
         self._commander.send_pose(grasp)
         time.sleep(0.6)
 
-        # Step 5 — lift back to home
-        log("5/5  Lifting to home...")
-        lift = list(HOME_POSE)
-        lift[4] = GRIPPER_CLOSED   # keep gripping while lifting
-        self._commander.send_pose(lift)
+        # Step 5 — lift
+        log("5/5  Lifting...")
+        self._commander.send_pose(poses["lift"])
         time.sleep(1.2)
 
         log(f"{color.upper()} picked!", "#44cc44")
