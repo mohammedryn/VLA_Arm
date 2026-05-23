@@ -76,6 +76,7 @@ COLOR_POSES = {
         "approach": [3063, 2607, 1393, 1806, GRIPPER_OPEN],
         "pick":     [3063, 2607, 1393, 1806, GRIPPER_OPEN],
         "lift":     [3064, 1969, 2014, 1805, 1862],
+        "place":    [3994, 2517, 1465, 1519, GRIPPER_CLOSED],
     },
     "blue": {
         "approach": [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
@@ -805,28 +806,38 @@ class DashboardWindow(QMainWindow):
         poses = COLOR_POSES[color]
 
         # Step 1 — home
-        log("1/5  Moving to home...")
+        log("1/7  Moving to home...")
         self._commander.move_smooth(HOME_POSE, duration_s=2.0)
 
         # Step 2 — approach
-        log("2/5  Approaching cube...")
+        log("2/7  Approaching cube...")
         self._commander.move_smooth(poses["approach"], duration_s=2.5)
 
         # Step 3 — lower to pick
-        log("3/5  Lowering to pick position...")
+        log("3/7  Lowering to pick position...")
         self._commander.move_smooth(poses["pick"], duration_s=1.2)
 
         # Step 4 — close gripper
-        log("4/5  Closing gripper...", "#FFA500")
+        log("4/7  Closing gripper...", "#FFA500")
         grasp = list(poses["pick"])
         grasp[4] = GRIPPER_CLOSED
         self._commander.move_smooth(grasp, duration_s=0.6, steps=15)
 
         # Step 5 — lift
-        log("5/5  Lifting...")
+        log("5/7  Lifting...")
         self._commander.move_smooth(poses["lift"], duration_s=2.0)
 
-        log(f"{color.upper()} picked!", "#44cc44")
+        # Step 6 — move to place position
+        log("6/7  Moving to place position...")
+        self._commander.move_smooth(poses["place"], duration_s=2.5)
+
+        # Step 7 — open gripper to release
+        log("7/7  Releasing...", "#FFA500")
+        release = list(poses["place"])
+        release[4] = GRIPPER_OPEN
+        self._commander.move_smooth(release, duration_s=0.6, steps=15)
+
+        log(f"{color.upper()} placed!", "#44cc44")
 
     def _handle_estop(self):
         with self._state._lock:
