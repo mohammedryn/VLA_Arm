@@ -63,7 +63,7 @@ GOAL_POS_REG = 0x2A                               # Goal Position (STS/SMS serie
 # Use read_servos.py to read live positions while you pose the arm manually.
 
 GRIPPER_OPEN   = 1540
-GRIPPER_CLOSED = 1795
+GRIPPER_CLOSED = 1937
 
 HOME_POSE = [3064, 2055, 1928, 1279, GRIPPER_OPEN]
 
