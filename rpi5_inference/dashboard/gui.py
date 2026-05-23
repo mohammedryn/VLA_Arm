@@ -54,7 +54,7 @@ SKILL_COLORS_MPL = {
 
 # ── Servo commander ───────────────────────────────────────────────────────────
 
-SERVO_PORT   = '/dev/ttyUSB0'
+SERVO_PORT   = '/dev/ttyACM0'
 SERVO_BAUD   = 1_000_000
 SERVO_IDS    = [0x01, 0x02, 0x03, 0x04, 0x05]   # J0 J1A J1B J2 J3
 GOAL_POS_REG = 0x2A                               # Goal Position (STS/SMS series)
