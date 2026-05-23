@@ -73,20 +73,28 @@ HOME_POSE = [3064, 2055, 1928, 1279, GRIPPER_OPEN]
 # "lift"     = where the arm goes after grasping
 COLOR_POSES = {
     "red": {
+        "home":     [3064, 2055, 1928, 1279, GRIPPER_OPEN],
         "approach": [3063, 2607, 1393, 1806, GRIPPER_OPEN],
         "pick":     [3063, 2607, 1393, 1806, GRIPPER_OPEN],
-        "lift":     [3064, 1969, 2014, 1805, 1862],
-        "place":    [3994, 2517, 1465, 1519, GRIPPER_CLOSED],
-    },
-    "blue": {
-        "approach": [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
-        "pick":     [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
-        "lift":     [3064, 1969, 2014, 1805, 1862],          # ← fill in
+        "grasp":    [3063, 2607, 1393, 1806, 1937],
+        "lift":     [3064, 1969, 2014, 1805, 1937],
+        "place":    [3994, 2517, 1465, 1519, 1937],
     },
     "green": {
+        "home":     [3081, 1965, 2007, 1242, GRIPPER_OPEN],
+        "approach": [3248, 2593, 1379, 2012, GRIPPER_OPEN],
+        "pick":     [3248, 2593, 1379, 2012, GRIPPER_OPEN],
+        "grasp":    [3248, 2593, 1379, 2012, 2007],
+        "lift":     [3081, 1965, 2007, 1242, 2007],
+        "place":    [3836, 2497, 1495, 1496, 2007],
+    },
+    "blue": {
+        "home":     [3064, 2055, 1928, 1279, GRIPPER_OPEN],  # ← fill in
         "approach": [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
         "pick":     [3063, 2607, 1393, 1806, GRIPPER_OPEN],  # ← fill in
-        "lift":     [3064, 1969, 2014, 1805, 1862],          # ← fill in
+        "grasp":    [3063, 2607, 1393, 1806, GRIPPER_CLOSED],# ← fill in
+        "lift":     [3064, 1969, 2014, 1805, GRIPPER_CLOSED],# ← fill in
+        "place":    [3994, 2517, 1465, 1519, GRIPPER_CLOSED],# ← fill in
     },
 }
 
@@ -805,33 +813,24 @@ class DashboardWindow(QMainWindow):
 
         poses = COLOR_POSES[color]
 
-        # Step 1 — home
         log("1/7  Moving to home...")
-        self._commander.move_smooth(HOME_POSE, duration_s=2.0)
+        self._commander.move_smooth(poses["home"], duration_s=2.0)
 
-        # Step 2 — approach
         log("2/7  Approaching cube...")
         self._commander.move_smooth(poses["approach"], duration_s=2.5)
 
-        # Step 3 — lower to pick
         log("3/7  Lowering to pick position...")
         self._commander.move_smooth(poses["pick"], duration_s=1.2)
 
-        # Step 4 — close gripper
         log("4/7  Closing gripper...", "#FFA500")
-        grasp = list(poses["pick"])
-        grasp[4] = GRIPPER_CLOSED
-        self._commander.move_smooth(grasp, duration_s=0.6, steps=15)
+        self._commander.move_smooth(poses["grasp"], duration_s=0.6, steps=15)
 
-        # Step 5 — lift
         log("5/7  Lifting...")
         self._commander.move_smooth(poses["lift"], duration_s=2.0)
 
-        # Step 6 — move to place position
         log("6/7  Moving to place position...")
         self._commander.move_smooth(poses["place"], duration_s=2.5)
 
-        # Step 7 — open gripper to release
         log("7/7  Releasing...", "#FFA500")
         release = list(poses["place"])
         release[4] = GRIPPER_OPEN
