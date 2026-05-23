@@ -59,9 +59,32 @@ SERVO_BAUD   = 1_000_000
 SERVO_IDS    = [0x01, 0x02, 0x03, 0x04, 0x05]   # J0 J1A J1B J2 J3
 GOAL_POS_REG = 0x2A                               # Goal Position (STS/SMS series)
 
-# ── Edit these to match your arm positions (steps, 0–4095 = 0–360°) ───────────
-PICK_POSE = [2048, 1800, 1800, 2200, 1500]   # J0 J1A J1B J2 J3
-HOME_POSE = [2048, 2048, 2048, 2048, 2048]
+# ── Fill in all poses below (servo steps, 0–4095 = 0°–360°) ──────────────────
+# Use read_servos.py to read live positions while you pose the arm manually.
+
+GRIPPER_OPEN   = 500   # ← replace
+GRIPPER_CLOSED = 1500  # ← replace
+
+HOME_POSE = [2048, 2048, 2048, 2048, GRIPPER_OPEN]  # ← replace
+
+# Per-color pick sequences — each entry: [J0, J1A, J1B, J2, J3]
+# "approach" = above the cube (gripper open)
+# "pick"     = lowered to cube level (gripper open)
+# grasp/lift are computed automatically from pick + GRIPPER_CLOSED
+COLOR_POSES = {
+    "red": {
+        "approach": [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
+        "pick":     [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
+    },
+    "blue": {
+        "approach": [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
+        "pick":     [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
+    },
+    "green": {
+        "approach": [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
+        "pick":     [2048, 2048, 2048, 2048, GRIPPER_OPEN],  # ← replace
+    },
+}
 
 
 class ServoCommander:
@@ -655,6 +678,8 @@ class ChatPanel(QFrame):
 # ── Main window ───────────────────────────────────────────────────────────────
 
 class DashboardWindow(QMainWindow):
+    _chat_append = pyqtSignal(str, str)   # text, color — safe cross-thread chat update
+
     def __init__(self, state: SharedState, generator: SyntheticDataGenerator):
         super().__init__()
         self._state = state
@@ -695,6 +720,7 @@ class DashboardWindow(QMainWindow):
         # Panel 6 — chat / command console (row 3, full width)
         self._chat = ChatPanel()
         self._chat.command_issued.connect(self._handle_command)
+        self._chat_append.connect(self._chat.append)
         grid.addWidget(self._chat, 3, 0, 1, 2)
         status_msg = (
             f"Servo board connected on {SERVO_PORT}"
@@ -702,7 +728,7 @@ class DashboardWindow(QMainWindow):
             else f"WARNING: servo board not found on {SERVO_PORT} — commands will be ignored"
         )
         self._chat.append(status_msg, "#44cc44" if self._commander.connected() else "#ff6644")
-        self._chat.append("Commands: pick | home", "#666")
+        self._chat.append("Commands: pick &lt;red|blue|green&gt; | home", "#666")
 
         # Row stretch: panels equal, status bar + chat fixed
         grid.setRowStretch(0, 1)
@@ -729,15 +755,65 @@ class DashboardWindow(QMainWindow):
         self._status.update_status(snap)
 
     def _handle_command(self, cmd: str):
-        POSES = {"pick": PICK_POSE, "home": HOME_POSE}
-        if cmd not in POSES:
-            self._chat.append(f"Unknown command: '{cmd}'", "#ff6644")
+        parts = cmd.split()
+        if parts[0] == "home":
+            self._chat.append("Moving to home...", "#4682B4")
+            ok = self._commander.send_pose(HOME_POSE)
+            self._chat.append("Home done." if ok else "ERROR: servo board not connected.",
+                              "#44cc44" if ok else "#ff6644")
+        elif parts[0] == "pick" and len(parts) == 2:
+            color = parts[1]
+            if color not in COLOR_POSES:
+                self._chat.append(
+                    f"Unknown color '{color}'. Use: red, blue, green", "#ff6644")
+                return
+            self._chat.append(f"Starting pick sequence → {color.upper()} cube", "#4682B4")
+            threading.Thread(target=self._run_pick, args=(color,), daemon=True).start()
+        else:
+            self._chat.append(
+                f"Unknown command: '{cmd}'. Try: pick red | pick blue | pick green | home",
+                "#ff6644")
+
+    def _run_pick(self, color: str):
+        def log(text, col="#aaa"):
+            self._chat_append.emit(text, col)
+
+        if not self._commander.connected():
+            log("ERROR: servo board not connected.", "#ff6644")
             return
-        pose = POSES[cmd]
-        self._chat.append(f"Sending {cmd.upper()} pose: {pose}", "#4682B4")
-        ok = self._commander.send_pose(pose)
-        msg = f"{cmd.upper()} done." if ok else "ERROR: servo board not connected."
-        self._chat.append(msg, "#44cc44" if ok else "#ff6644")
+
+        poses = COLOR_POSES[color]
+
+        # Step 1 — home
+        log("1/5  Moving to home...")
+        self._commander.send_pose(HOME_POSE)
+        time.sleep(1.2)
+
+        # Step 2 — open gripper & approach
+        log("2/5  Approaching cube (gripper open)...")
+        self._commander.send_pose(poses["approach"])
+        time.sleep(1.2)
+
+        # Step 3 — lower to pick
+        log("3/5  Lowering to pick position...")
+        self._commander.send_pose(poses["pick"])
+        time.sleep(0.8)
+
+        # Step 4 — close gripper
+        log("4/5  Closing gripper...", "#FFA500")
+        grasp = list(poses["pick"])
+        grasp[4] = GRIPPER_CLOSED
+        self._commander.send_pose(grasp)
+        time.sleep(0.6)
+
+        # Step 5 — lift back to home
+        log("5/5  Lifting to home...")
+        lift = list(HOME_POSE)
+        lift[4] = GRIPPER_CLOSED   # keep gripping while lifting
+        self._commander.send_pose(lift)
+        time.sleep(1.2)
+
+        log(f"{color.upper()} picked!", "#44cc44")
 
     def _handle_estop(self):
         with self._state._lock:
