@@ -94,6 +94,7 @@ class ServoCommander:
     def __init__(self):
         self._ser = None
         self._lock = threading.Lock()
+        self._last_pose: list | None = None
         try:
             self._ser = serial.Serial(SERVO_PORT, SERVO_BAUD, timeout=0.1)
             time.sleep(0.2)
@@ -117,6 +118,22 @@ class ServoCommander:
                 pkt = bytes([0xFF, 0xFF, sid, length, instr, GOAL_POS_REG, pos_l, pos_h, chk])
                 self._ser.write(pkt)
                 time.sleep(0.005)
+        self._last_pose = list(positions)
+        return True
+
+    def move_smooth(self, target: list, duration_s: float = 1.5, steps: int = 30) -> bool:
+        """Linearly interpolate from last known pose to target over duration_s seconds."""
+        if not self.connected():
+            return False
+        start = list(self._last_pose) if self._last_pose else list(target)
+        # Each send_pose call takes ~25 ms (5 servos × 5 ms); subtract that from sleep
+        step_delay = max(0.0, duration_s / steps - 0.025)
+        for i in range(1, steps + 1):
+            t = i / steps
+            pose = [int(round(s + (e - s) * t)) for s, e in zip(start, target)]
+            if not self.send_pose(pose):
+                return False
+            time.sleep(step_delay)
         return True
 
     def close(self):
@@ -789,30 +806,25 @@ class DashboardWindow(QMainWindow):
 
         # Step 1 — home
         log("1/5  Moving to home...")
-        self._commander.send_pose(HOME_POSE)
-        time.sleep(1.2)
+        self._commander.move_smooth(HOME_POSE, duration_s=2.0)
 
-        # Step 2 — open gripper & approach
-        log("2/5  Approaching cube (gripper open)...")
-        self._commander.send_pose(poses["approach"])
-        time.sleep(1.2)
+        # Step 2 — approach
+        log("2/5  Approaching cube...")
+        self._commander.move_smooth(poses["approach"], duration_s=2.5)
 
         # Step 3 — lower to pick
         log("3/5  Lowering to pick position...")
-        self._commander.send_pose(poses["pick"])
-        time.sleep(0.8)
+        self._commander.move_smooth(poses["pick"], duration_s=1.2)
 
         # Step 4 — close gripper
         log("4/5  Closing gripper...", "#FFA500")
         grasp = list(poses["pick"])
         grasp[4] = GRIPPER_CLOSED
-        self._commander.send_pose(grasp)
-        time.sleep(0.6)
+        self._commander.move_smooth(grasp, duration_s=0.6, steps=15)
 
         # Step 5 — lift
         log("5/5  Lifting...")
-        self._commander.send_pose(poses["lift"])
-        time.sleep(1.2)
+        self._commander.move_smooth(poses["lift"], duration_s=2.0)
 
         log(f"{color.upper()} picked!", "#44cc44")
 
