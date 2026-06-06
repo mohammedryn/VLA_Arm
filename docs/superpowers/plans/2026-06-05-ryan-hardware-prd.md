@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Mount a wrist camera, calibrate the arm via LeRobot, collect 30+ teleoperated pick-and-place demonstrations, push the dataset to HuggingFace, and ship a simplified ESP32 safety monitor — all so the trained ACT checkpoint can be deployed for a clean hiring-level demo.
+**Goal:** Mount a wrist camera, calibrate the arm via LeRobot, collect 50-80 teleoperated pick-and-place demonstrations, push the dataset to HuggingFace, and ship a simplified ESP32 safety monitor — all so the trained ACT checkpoint can be deployed for a clean hiring-level demo.
 
 **Architecture:** Servo commands flow RPi5 → `/dev/ttyACM0` (SmartElex USB adapter) → STS3215 servos — directly via LeRobot's `FeetechMotorsBus`. The ESP32 on `/dev/ttyUSB0` is repurposed as a **safety-only monitor** (IMU contact detection + emergency stop). The broken 50Hz telemetry path is permanently abandoned — do not debug it.
 
@@ -32,7 +32,7 @@
 ### Architecture decision: LeRobot replaces the custom VLA stack
 The original `rpi5_inference/` custom VLA pipeline is **replaced** by HuggingFace LeRobot + ACT. Reasons:
 1. LeRobot's `FeetechMotorsBus` already works with STS3215 on `/dev/ttyACM0`
-2. ACT trains well on 30 demos — no custom policy code needed
+2. ACT trains well on 50-80 demos — no custom policy code needed
 3. The 50Hz ESP32 telemetry stream was broken (bad checksum, 64-byte repeating pattern) and the root cause was not diagnosed — with LeRobot we don't need it
 
 ### Division of labour
@@ -46,7 +46,7 @@ You send motor spec → Friend writes robot config (Task 2)
                     ↓
 You calibrate arm (Task 4) ← needs friend's Task 2 done
                     ↓
-You collect 30 demos (Task 5) ← needs friend's Task 4 (record script) done
+You collect 50-80 demos (Task 5) ← needs friend's Task 4 (record script) done
                     ↓
 You push dataset → Friend trains ACT → Friend sends checkpoint
                     ↓
@@ -374,7 +374,7 @@ cd ~/vla_rob
 python scripts/record_roarm.py \
   --follower_port /dev/ttyACM0 \
   --repo_id $HF_USER/roarm_pickplace_v1 \
-  --num_episodes 35 \
+  --num_episodes 50 \
   --camera_index 0
 ```
 
@@ -417,7 +417,7 @@ If actions look constant/frozen: leader arm may not be transmitting. Check its c
 python scripts/record_roarm.py \
   --follower_port /dev/ttyACM0 \
   --repo_id $HF_USER/roarm_pickplace_v1 \
-  --num_episodes 35 \
+  --num_episodes 50 \
   --camera_index 0
 ```
 
@@ -439,9 +439,9 @@ print('FPS:', meta.fps)
 "
 ```
 
-Expected: `Total episodes: 35`, `Total frames: ~31500` (35 × ~15s × 30fps ≈ 15750 minimum)
+Expected: `Total episodes: 50`, `Total frames: ~45000` (50 × ~30s × 30fps)
 
-Only proceed if episode count is ≥ 30.
+Only proceed if episode count is ≥ 50.
 
 - [ ] **Step 2: Push to HuggingFace Hub**
 
@@ -462,7 +462,7 @@ Dataset URL: `https://huggingface.co/datasets/$HF_USER/roarm_pickplace_v1`
 Send friend this message:
 ```
 Dataset ready: <YOUR_HF_USER>/roarm_pickplace_v1
-35 episodes, task: "Pick the red cube and place it in the bin"
+50 episodes, task: "Pick the red cube and place it in the bin"
 Camera key: wrist (640×480 @ 30fps)
 Action dims: 5 (shoulder_pan, shoulder_lift, shoulder_lift_b, elbow_flex, gripper)
 Start training.
@@ -473,6 +473,20 @@ Start training.
 ## Task 7: Deploy Trained Checkpoint
 
 **Prerequisite: friend has sent you a HuggingFace model ID, e.g. `friendname/roarm_act_v1`.**
+
+> **⚠️ RPi5 inference speed:** RPi5 ARM CPU takes ~10–15 seconds per ACT inference pass. At 30fps you need one every 0.033s — even with 100-step action chunking (~3.3s of actions), you'll always be waiting on inference. **Solution:** Run `rollout_roarm.py` from the **GPU laptop**, and expose the RPi5's servo USB adapter over the network using `usbip`:
+> ```bash
+> # On RPi5 — export the USB device
+> sudo modprobe usbip_host && sudo usbipd -D
+> sudo usbip bind -b <bus-id-of-ttyACM0>   # find bus-id with: usbip list -l
+>
+> # On GPU laptop — attach it as a local device
+> sudo modprobe vhci-hcd
+> sudo usbip attach -r <rpi5-ip> -b <bus-id>
+> # /dev/ttyACM0 now appears on the GPU laptop
+> python scripts/rollout_roarm.py --model_id friendname/roarm_act_v1 --port /dev/ttyACM0
+> ```
+> Alternatively SSH into RPi5 and keep the servo port local, but serve inference over a TCP socket — ask friend to set this up if usbip is unavailable on your OS.
 
 - [ ] **Step 1: Install rollout script dependency on RPi5**
 
@@ -572,7 +586,7 @@ static_assert(sizeof(SafetyStatus_t) == 16, "SafetyStatus_t must be 16 bytes");
 #include "safety_comms.h"
 #include "../ism330dhcx_driver.h"
 #include "../contact_oracle.h"
-#include "../config.h"
+#include "config.h"
 
 // ── Safety thresholds ─────────────────────────────────────────────────────────
 // Contact oracle fires when 8-sample gyro RMS exceeds this (deg/s).
@@ -592,7 +606,6 @@ static void send_safety_packet(bool estop) {
     pkt.contact_flag = contact_oracle_triggered() ? 1 : 0;
     pkt.contact_rms  = contact_oracle_rms();
     pkt.estop_active = estop ? 1 : 0;
-    pkt._pad         = 0;
     pkt.checksum     = compute_checksum(
         (const uint8_t*)&pkt,
         sizeof(SafetyStatus_t) - sizeof(pkt.checksum)
@@ -853,7 +866,7 @@ lerobot-calibrate --robot.type=roarm_m2s_follower --robot.port=/dev/ttyACM0 --ro
 # Record demos (RPi5) — USB gamepad, replace $HF_USER with your HuggingFace username
 python ~/vla_rob/scripts/record_roarm.py \
   --follower_port /dev/ttyACM0 \
-  --repo_id $HF_USER/roarm_pickplace_v1 --num_episodes 35
+  --repo_id $HF_USER/roarm_pickplace_v1 --num_episodes 50
 
 # Deploy trained checkpoint (RPi5)
 python ~/vla_rob/scripts/rollout_roarm.py \

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Integrate the RoArm M2-S (5-motor STS3215 arm) into HuggingFace LeRobot, train an ACT policy from ~30 teleoperation demos, and deploy it on Raspberry Pi 5 for autonomous pick-and-place with an eye-in-hand camera.
+**Goal:** Integrate the RoArm M2-S (5-motor STS3215 arm) into HuggingFace LeRobot, train an ACT policy from 50-80 teleoperation demos, and deploy it on Raspberry Pi 5 for autonomous pick-and-place with an eye-in-hand camera.
 
 **Architecture:** You write the custom robot config (Python, LeRobot source), record script, training pipeline, and rollout script. Ryan (hardware) calibrates the arm, collects demos, and runs the final checkpoint on RPi5. You work on a GPU machine for training; everything else runs on RPi5.
 
@@ -25,7 +25,7 @@ The robot is a **Waveshare RoArm M2-S** — a 4-DOF arm with 5 STS3215 (Feetech)
 | `elbow_flex` | 4 | sts3215 | DEGREES | Elbow / wrist combined |
 | `gripper` | 5 | sts3215 | RANGE_0_100 | 0 = open, 100 = closed |
 
-**Coupled shoulder:** ID 2 and ID 3 are mechanically linked — two servos driving the same shoulder joint for torque. Every command to `shoulder_lift` must be mirrored to `shoulder_lift_b`. This is handled in `send_action()` internally; the policy never sees `shoulder_lift_b` as a separate output — it's managed by the robot class.
+**Coupled shoulder:** ID 2 and ID 3 are mechanically linked — two servos driving the same shoulder joint for torque. Every command to `shoulder_lift` must be mirrored to `shoulder_lift_b`. The policy trains with a **5-dim action space** that includes `shoulder_lift_b`. In `send_action()`, the policy's `shoulder_lift_b` output is always overwritten with `shoulder_lift`'s value to enforce the coupling. The policy learns from demos that both values are identical — this is fine in practice.
 
 **Camera:** USB camera mounted on the wrist (eye-in-hand), OpenCV index 0, 640×480 @ 30fps. The policy observes from this camera.
 
@@ -443,7 +443,7 @@ Usage:
     python scripts/record_roarm.py \
         --follower_port /dev/ttyACM0 \
         --repo_id YOUR_HF_USERNAME/roarm_pickplace_v1 \
-        --num_episodes 35
+        --num_episodes 50
 
 Gamepad controls (standard layout):
     Left stick  → shoulder_pan + shoulder_lift
@@ -624,7 +624,7 @@ print('Features:', list(meta.features.keys())[:10])
 "
 ```
 
-Expected: `Episodes: 35`, `Frames: ~31500` (35 × 30s × 30fps), feature keys including `observation.state`, `action`, `observation.images.wrist`
+Expected: `Episodes: 50`, `Frames: ~45000` (50 × 30s × 30fps), feature keys including `observation.state`, `action`, `observation.images.wrist`
 
 - [ ] **Step 2: Inspect one episode to confirm it looks correct**
 
@@ -732,7 +732,9 @@ git commit -m "feat: add ACT training command for RoArm M2-S"
 **Files:**
 - Create: `~/vla_rob/scripts/rollout_roarm.py`
 
-**Run on RPi5.** No EE kinematics needed — policy operates directly in joint space.
+> **⚠️ RPi5 inference speed:** RPi5 ARM CPU takes ~10–15 seconds per ACT inference pass. With 100-step action chunking, you need re-inference every ~3.3s but inference takes 10–15s — always waiting. **Do not run rollout on RPi5 CPU.** Instead, run rollout on the **GPU laptop** using `usbip` to expose `/dev/ttyACM0` from RPi5 as a local device. See Ryan's Task 7 for the `usbip` setup steps. The rollout script itself is identical either way.
+
+**Run on GPU laptop (not RPi5).** No EE kinematics needed — policy operates directly in joint space.
 
 - [ ] **Step 1: Write rollout script**
 
@@ -752,6 +754,11 @@ Press Ctrl+C to stop cleanly.
 """
 
 import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ~/vla_rob on sys.path
+from firmware.tools.safety_listener import SafetyMonitor
 
 from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.configs import PreTrainedConfig
@@ -804,13 +811,23 @@ def main():
 
     signal_handler = ProcessSignalHandler(use_threads=True)
 
-    ctx = build_rollout_context(cfg, signal_handler.shutdown_event)
-    strategy = BaseStrategy(cfg.strategy)
+    monitor = SafetyMonitor(
+        port="/dev/ttyUSB0",
+        baud=2_000_000,
+        on_estop=signal_handler.trigger_shutdown,
+    )
+    monitor.start()
+
     try:
-        strategy.setup(ctx)
-        strategy.run(ctx)
+        ctx = build_rollout_context(cfg, signal_handler.shutdown_event)
+        strategy = BaseStrategy(cfg.strategy)
+        try:
+            strategy.setup(ctx)
+            strategy.run(ctx)
+        finally:
+            strategy.teardown(ctx)
     finally:
-        strategy.teardown(ctx)
+        monitor.stop()
 
 
 if __name__ == "__main__":
@@ -863,7 +880,7 @@ Ryan confirms motor IDs and camera index before recording.
 Ryan tells Friend:
 ```
 Dataset pushed to HuggingFace: ryanm/roarm_pickplace_v1
-35 episodes, task: "Pick the red cube and place it in the bin"
+50 episodes, task: "Pick the red cube and place it in the bin"
 ```
 
 Friend starts Task 5 (training).
@@ -889,7 +906,7 @@ lerobot-calibrate --robot.type=roarm_m2s_follower --robot.port=/dev/ttyACM0 --ro
 python scripts/record_roarm.py \
   --follower_port /dev/ttyACM0 \
   --repo_id YOUR_HF_USERNAME/roarm_pickplace_v1 \
-  --num_episodes 35
+  --num_episodes 50
 
 # Train (GPU machine)
 bash scripts/train_act.sh
