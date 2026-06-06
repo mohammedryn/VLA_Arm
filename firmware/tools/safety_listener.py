@@ -34,13 +34,25 @@ class SafetyMonitor:
     """Thread that continuously reads safety packets and fires on_estop() on hard contact."""
 
     def __init__(self, port: str = '/dev/ttyUSB0', baud: int = 2_000_000, on_estop=None):
-        self.port     = port
-        self.baud     = baud
-        self.on_estop = on_estop
-        self._stop    = threading.Event()
-        self._thread  = threading.Thread(target=self._run, daemon=True)
-        self.last_rms = 0.0
-        self.contact  = False
+        self.port          = port
+        self.baud          = baud
+        self.on_estop      = on_estop
+        self._stop         = threading.Event()
+        self._thread       = threading.Thread(target=self._run, daemon=True)
+        self._state_lock   = threading.Lock()
+        self._estop_fired  = False
+        self._last_rms     = 0.0
+        self._contact      = False
+
+    @property
+    def last_rms(self) -> float:
+        with self._state_lock:
+            return self._last_rms
+
+    @property
+    def contact(self) -> bool:
+        with self._state_lock:
+            return self._contact
 
     def start(self):
         self._thread.start()
@@ -86,9 +98,11 @@ class SafetyMonitor:
                 if raw is None:
                     continue
                 _, _, contact_flag, rms, estop_active, _ = struct.unpack(PACKET_FMT, raw)
-                self.last_rms = rms
-                self.contact  = bool(contact_flag)
-                if estop_active and self.on_estop:
+                with self._state_lock:
+                    self._last_rms = rms
+                    self._contact  = bool(contact_flag)
+                if estop_active and self.on_estop and not self._estop_fired:
+                    self._estop_fired = True
                     logger.warning("SafetyMonitor: ESTOP received (contact_rms=%.2f)", rms)
                     self.on_estop()
         finally:
