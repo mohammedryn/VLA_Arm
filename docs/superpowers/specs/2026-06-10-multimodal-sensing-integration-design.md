@@ -27,6 +27,8 @@
 - Preserve the existing safety function (contact detection → e-stop) without a separate safety MCU.
 - Add language-phrase variation (2 phrases) to `single_task` from episode 1, enabling a future
   language-conditioning ablation.
+- Add STS3215 present-load (implicit joint torque / force proxy) as a fourth observation channel —
+  zero new hardware, read over the existing servo bus alongside joint position.
 - Consolidate onto hardware already in hand (Teensy 4.1, RPi5, RPi Pico W spare) and match the project's
   stated hardware target (Teensy 4.1 / PlatformIO / 50Hz loop per `CLAUDE.md`).
 
@@ -438,6 +440,7 @@ the RPi5, then `udevadm control --reload-rules && udevadm trigger`.
 |---|---|---|---|
 | `observation.tof` | float32 | (8, 8) | meters, row-major; invalid zones clamped to 4.0 (= "nothing in range") |
 | `observation.imu` | float32 | (6,) | `[accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z]`, m/s² and deg/s |
+| `observation.servo_load` | float32 | (5,) | normalized `[-1, 1]` per motor (sign = direction), STS3215 `Present_Load` register, force/torque proxy |
 
 ### 7.2 Existing features (unchanged from the AI/ML LeRobot plan)
 
@@ -451,22 +454,39 @@ the RPi5, then `udevadm control --reload-rules && udevadm trigger`.
 ### 7.3 Recording loop integration
 
 ```python
+import numpy as np
 from firmware.tools.sensor_listener import SensorMonitor
 
 sensor_monitor = SensorMonitor(port="/dev/roarm_teensy", on_estop=lambda: robot.disconnect())
 sensor_monitor.start()
 
+MOTOR_ORDER = ["shoulder_pan", "shoulder_lift", "shoulder_lift_b", "elbow_flex", "gripper"]
+
+def _normalize_load(raw: int) -> float:
+    """STS3215 Present_Load: bit10=direction, bits0-9=magnitude (0-1000 -> 0-100.0%)."""
+    magnitude = (raw & 0x3FF) / 1000.0
+    sign = -1.0 if (raw & 0x400) else 1.0
+    return sign * magnitude
+
 # inside the per-frame callback used by record_loop():
 def get_observation_extra():
     snap = sensor_monitor.latest_observation()
-    return {"observation.tof": snap["tof"], "observation.imu": snap["imu"]}
+    raw_load = robot.bus.sync_read("Present_Load")  # {motor_name: raw uint16}
+    servo_load = np.array([_normalize_load(raw_load[name]) for name in MOTOR_ORDER], dtype=np.float32)
+    return {
+        "observation.tof": snap["tof"],
+        "observation.imu": snap["imu"],
+        "observation.servo_load": servo_load,
+    }
 ```
 
 `record_loop()` (from the AI/ML plan) calls `robot.get_observation()` for camera + joint state each
 frame; `get_observation_extra()` is merged into that dict before `dataset.add_frame()`. This is a
 single 30Hz polling point — the same "grab whatever's freshest" pattern already used for camera and
-joint state, applied uniformly to the Teensy packet. No new threads or timers are introduced in the
-recording script itself; `SensorMonitor` owns its own background thread (as `safety_listener` did).
+joint state, applied uniformly to the Teensy packet and the servo bus's load register. No new threads
+or timers are introduced in the recording script itself; `SensorMonitor` owns its own background
+thread (as `safety_listener` did), and `Present_Load` is read synchronously on the same bus call
+pattern as `Present_Position`.
 
 If `sensor_monitor.contact` is `True` mid-episode, the existing safety-stop behavior (pause/abort
 recording) applies exactly as it would have under the old safety listener — the `on_estop` callback
@@ -510,15 +530,23 @@ a separate checklist.
 
 Same eval set (fixed object positions/lighting, held out from training) across all variants:
 
-1. **Baseline**: `observation.images.wrist` + `observation.state` only (drop `tof`/`imu` at train time)
+1. **Baseline**: `observation.images.wrist` + `observation.state` only (drop `tof`/`imu`/`servo_load` at train time)
 2. **+ToF**: add `observation.tof`
 3. **+ToF+IMU**: add `observation.imu`
 4. **Language**: train on both phrases vs. train on phrase A only, eval on phrase B — tests whether
    `single_task` actually conditions object selection or the policy ignores it
+5. **+ServoLoad**: add `observation.servo_load` — tests whether implicit joint-torque feedback helps
+   contact-aware grasp/placement behavior
 
 Compare success rate (grasp success, placement success) per variant. This is friend's training-side
-work; this spec only guarantees the dataset contains everything needed to run all four configs without
+work; this spec only guarantees the dataset contains everything needed to run all five configs without
 re-collection.
+
+**On ablation 4 specifically**: with only two phrases differing by one word ("red"/"blue"), it is
+entirely possible the policy ignores `single_task` and learns one merged pick-and-place behavior keyed
+off the visual scene alone. That outcome is itself the result of this ablation and should be reported
+as such — it is not a failed experiment, and it directly scopes what a v3 (more phrases, more demos)
+would need to fix.
 
 ---
 
@@ -540,7 +568,11 @@ re-collection.
 
 1. **Library portability**: confirm `stm32duino/STM32duino VL53L5CX` compiles under
    `platform = teensy, board = teensy41` (it's a generic Arduino `Wire`-based library, expected to work,
-   but unverified on this MCU).
+   but unverified on this MCU). This is the highest-risk unverified assumption in this spec — run the
+   ToF bring-up sketch on the Teensy **before** writing `sensor_main.cpp`. **Fallback**: if it fails to
+   build/init on Teensy, swap to the SparkFun VL53L5CX Arduino library — same `init`/`get_ranging_data`
+   API shape, more broadly tested across non-ESP32 platforms; `tof_driver.cpp` would need only its
+   include and a few call-site renames, not a redesign.
 2. **I2C rewire bring-up**: re-verify IMU `WHO_AM_I` (0x6B) and a ToF distance reading on the new
    Teensy pins (18/19 + LPN=2/INT=3) before integrating into `sensor_main.cpp`.
 3. **udev serial numbers**: must be read from the actual hardware on the RPi5 (placeholders in
@@ -550,6 +582,16 @@ re-collection.
 5. **ToF mounting**: physical placement of the VL53L5CX relative to the new wrist camera mount is a
    dependency of the (separate, already-planned) camera-mount task — not designed here, but the
    recording pipeline assumes it's wrist-mounted and roughly co-aligned with the camera's view axis.
+6. **E-stop latch in testing**: `SensorMonitor._estop_fired` is a one-shot latch by design — the
+   firmware's `estop_active` condition (`contact_rms > 3x threshold`) is unlatched/reactive per loop,
+   but Python fires `on_estop()` exactly once per `SensorMonitor` instance. This is the correct pairing
+   for a recording session, but any bring-up/test script that deliberately triggers contact multiple
+   times must construct a fresh `SensorMonitor` (or manually reset `_estop_fired`) between trigger
+   tests, or it will look like the e-stop "stopped working" after the first hit.
+7. **`Present_Load` register name/format**: confirm the exact control-table key (`"Present_Load"`) and
+   bit layout (bit10=direction, bits0-9=magnitude/1000) against LeRobot's STS3215 control table —
+   `_normalize_load()` in §7.3 assumes the same encoding as the Feetech SCServo datasheet; verify with
+   one `sync_read` against a loaded vs. unloaded joint before relying on sign/magnitude.
 
 ---
 
