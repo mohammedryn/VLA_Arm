@@ -1,5 +1,5 @@
 #include "ism330dhcx_driver.h"
-#include "config.h"
+#include "sensor_safety/sensor_config.h"
 #include "contact_oracle.h"
 #include <Wire.h>
 
@@ -35,7 +35,7 @@ static uint8_t imu_read_reg(uint8_t reg) {
 }
 
 void imu_init() {
-    Wire.begin(TOF_SDA, TOF_SCL);
+    Wire.begin();
     Wire.setClock(400000);
     while (imu_read_reg(ISM_WHO_AM_I) != 0x6B) {
         Serial.println("IMU not found on I2C — retrying...");

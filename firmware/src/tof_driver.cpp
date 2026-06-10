@@ -1,6 +1,6 @@
 #include "tof_driver.h"
 #include "vl53l5cx_class.h"
-#include "config.h"
+#include "sensor_safety/sensor_config.h"
 #include <Wire.h>
 
 static VL53L5CX* tof_sensor = nullptr;
@@ -10,7 +10,7 @@ void tof_init() {
     pinMode(TOF_LPN, OUTPUT);
     pinMode(TOF_INT, INPUT_PULLUP);
     
-    Wire.begin(TOF_SDA, TOF_SCL);
+    Wire.begin();
     Wire.setClock(400000);  // 400kHz Fast I2C mode
     
     // Construct sensor instance using Wire and LPn pin
