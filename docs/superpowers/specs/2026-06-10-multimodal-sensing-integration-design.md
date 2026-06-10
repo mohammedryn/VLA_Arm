@@ -251,15 +251,22 @@ platform      = teensy
 board         = teensy41
 framework     = arduino
 build_flags   = -O2 -std=c++17
-build_src_filter = +<*> -<main.cpp> -<safety_monitor/*> +<sensor_safety/sensor_main.cpp>
+build_src_filter =
+    -<*>
+    +<ism330dhcx_driver.cpp>
+    +<tof_driver.cpp>
+    +<contact_oracle.cpp>
+    +<sensor_safety/sensor_main.cpp>
 lib_deps =
     Wire
     stm32duino/STM32duino VL53L5CX @ ^1.2.3
 ```
 
-The `[env:esp32dev]` section is removed. `firmware/src/safety_monitor/` is excluded from the build
-(then deleted as part of implementation cleanup). `firmware/src/main.cpp` and the abandoned
-250-byte-telemetry sources remain excluded and untouched, per the existing PRD.
+The `[env:esp32dev]` section is removed. The filter starts from `-<*>` (exclude everything) and
+explicitly opts in only the four files this firmware needs — `main.cpp`, `comms.cpp`, `servo_bus.cpp`,
+`waypoint_interp.cpp`, `safety_layer.cpp`, and (after deletion) `safety_monitor/*` are all excluded.
+This avoids accidentally compiling the abandoned 250-byte-telemetry sources, which `#include
+"config.h"` (ESP32-specific) and would not build under `teensy41`.
 
 ---
 
