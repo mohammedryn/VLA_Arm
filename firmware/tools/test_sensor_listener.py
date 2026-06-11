@@ -1,4 +1,5 @@
 import struct
+import threading
 import numpy as np
 import pytest
 
@@ -6,6 +7,7 @@ from firmware.tools.sensor_listener import (
     PACKET_SIZE,
     SENSOR_MAGIC,
     TOF_MAX_RANGE_M,
+    SensorMonitor,
     compute_checksum,
     normalize_load,
     parse_packet,
@@ -84,3 +86,33 @@ def test_parse_packet_wrong_size_raises():
 ])
 def test_normalize_load(raw, expected):
     assert normalize_load(raw) == pytest.approx(expected)
+
+
+def test_stop_called_from_within_monitor_thread_does_not_raise():
+    """Simulates on_estop -> consumer.disconnect() -> monitor.stop() being
+    called from within the monitor's own background thread (e.g. when
+    on_estop fires synchronously from _run() on self._thread)."""
+    monitor = SensorMonitor(port="/dev/null")
+    result = {}
+
+    def target():
+        try:
+            monitor.stop()
+        except Exception as e:
+            result["error"] = e
+        else:
+            result["error"] = None
+
+    monitor._thread = threading.Thread(target=target, daemon=True)
+    monitor._thread.start()
+    monitor._thread.join(timeout=2.0)
+
+    assert result["error"] is None
+    assert monitor._stop.is_set()
+
+
+def test_stop_before_start_does_not_raise():
+    """stop() may be called before start() (thread never started)."""
+    monitor = SensorMonitor(port="/dev/null")
+    monitor.stop()  # should not raise RuntimeError("cannot join thread before it is started")
+    assert monitor._stop.is_set()

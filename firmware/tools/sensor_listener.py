@@ -109,7 +109,8 @@ class SensorMonitor:
 
     def stop(self):
         self._stop.set()
-        self._thread.join(timeout=2.0)
+        if self._thread.is_alive() and threading.current_thread() is not self._thread:
+            self._thread.join(timeout=2.0)
 
     def _find_packet(self, ser: serial.Serial):
         """Scan stream for magic bytes, read rest of packet, verify checksum."""
